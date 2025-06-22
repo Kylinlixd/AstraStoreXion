@@ -1,0 +1,164 @@
+version: '3'
+
+services:
+  # 服务发现
+  consul:
+    image: consul:1.14
+    ports:
+      - "8500:8500"
+    volumes:
+      - consul_data:/consul/data
+    command: agent -server -bootstrap -ui -client=0.0.0.0
+
+  # 分布式协调
+  etcd:
+    image: bitnami/etcd:3.5
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd_data:/bitnami/etcd
+
+  # 元数据服务
+  metaservice:
+    build:
+      context: ..
+      dockerfile: deploy/dockerfile/metaservice.Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      - CONFIG_FILE=/app/configs/metaservice.yaml
+    volumes:
+      - ../configs:/app/configs
+      - meta_logs:/app/logs
+    depends_on:
+      - consul
+      - etcd
+      - mysql
+
+  # 数据库
+  mysql:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=astrastore
+      - MYSQL_USER=astrastore
+      - MYSQL_PASSWORD=astrastore_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # 存储节点1
+  storage-node-1:
+    build:
+      context: ..
+      dockerfile: deploy/dockerfile/storagenode.Dockerfile
+    ports:
+      - "9101:9100"
+      - "9201:9200"
+    environment:
+      - NODE_ID=node1
+      - CONFIG_FILE=/app/configs/storagenode.yaml
+    volumes:
+      - ../configs:/app/configs
+      - storage_data_1:/app/data
+      - storage_logs_1:/app/logs
+    depends_on:
+      - consul
+      - etcd
+
+  # 存储节点2
+  storage-node-2:
+    build:
+      context: ..
+      dockerfile: deploy/dockerfile/storagenode.Dockerfile
+    ports:
+      - "9102:9100"
+      - "9202:9200"
+    environment:
+      - NODE_ID=node2
+      - CONFIG_FILE=/app/configs/storagenode.yaml
+    volumes:
+      - ../configs:/app/configs
+      - storage_data_2:/app/data
+      - storage_logs_2:/app/logs
+    depends_on:
+      - consul
+      - etcd
+
+  # 存储节点3
+  storage-node-3:
+    build:
+      context: ..
+      dockerfile: deploy/dockerfile/storagenode.Dockerfile
+    ports:
+      - "9103:9100"
+      - "9203:9200"
+    environment:
+      - NODE_ID=node3
+      - CONFIG_FILE=/app/configs/storagenode.yaml
+    volumes:
+      - ../configs:/app/configs
+      - storage_data_3:/app/data
+      - storage_logs_3:/app/logs
+    depends_on:
+      - consul
+      - etcd
+
+  # API网关
+  apigateway:
+    build:
+      context: ..
+      dockerfile: deploy/dockerfile/apigateway.Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - CONFIG_FILE=/app/configs/apigateway.yaml
+    volumes:
+      - ../configs:/app/configs
+      - api_logs:/app/logs
+    depends_on:
+      - metaservice
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+
+  # 监控 - Prometheus
+  prometheus:
+    image: prom/prometheus:v2.43.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+
+  # 监控 - Grafana
+  grafana:
+    image: grafana/grafana:9.5.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  consul_data:
+  etcd_data:
+  mysql_data:
+  storage_data_1:
+  storage_data_2:
+  storage_data_3:
+  storage_logs_1:
+  storage_logs_2:
+  storage_logs_3:
+  meta_logs:
+  api_logs:
+  prometheus_data:
+  grafana_data: 

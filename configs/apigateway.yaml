@@ -1,0 +1,31 @@
+# API网关配置
+server:
+  port: 8080
+  read_timeout: 60s
+  write_timeout: 60s
+  idle_timeout: 120s
+
+# 服务发现
+consul:
+  address: "localhost:8500"
+  register_name: "api-gateway"
+
+# 元数据服务
+meta_service:
+  address: "localhost:9000"
+  timeout: 5s
+
+# 存储服务
+storage_service:
+  timeout: 10s
+
+# 日志配置
+log:
+  level: "info"
+  path: "logs/api-gateway.log"
+
+# 缓存配置
+cache:
+  enabled: true
+  ttl: 60s
+  max_size: 100MB 

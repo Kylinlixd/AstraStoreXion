@@ -1,0 +1,79 @@
+syntax = "proto3";
+package api;
+
+option go_package = "github.com/astrastore/astrastore-xion/pkg/api";
+
+// 文件服务定义
+service FileService {
+  // 上传文件
+  rpc UploadFile(UploadFileRequest) returns (UploadFileResponse) {}
+  
+  // 下载文件
+  rpc DownloadFile(DownloadFileRequest) returns (stream DownloadFileResponse) {}
+  
+  // 删除文件
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse) {}
+  
+  // 检查文件状态
+  rpc GetFileStatus(GetFileStatusRequest) returns (GetFileStatusResponse) {}
+}
+
+// 上传文件请求
+message UploadFileRequest {
+  string filename = 1;
+  bytes content = 2;
+  map<string, string> metadata = 3;
+}
+
+// 上传文件响应
+message UploadFileResponse {
+  string file_id = 1;
+  bool success = 2;
+  string message = 3;
+}
+
+// 下载文件请求
+message DownloadFileRequest {
+  string file_id = 1;
+}
+
+// 下载文件响应
+message DownloadFileResponse {
+  bytes chunk_data = 1;
+  int64 chunk_offset = 2;
+  bool is_last_chunk = 3;
+}
+
+// 删除文件请求
+message DeleteFileRequest {
+  string file_id = 1;
+}
+
+// 删除文件响应
+message DeleteFileResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// 获取文件状态请求
+message GetFileStatusRequest {
+  string file_id = 1;
+}
+
+// 获取文件状态响应
+message GetFileStatusResponse {
+  string file_id = 1;
+  string filename = 2;
+  int64 size = 3;
+  string status = 4; // "available", "pending", "corrupted"
+  map<string, string> metadata = 5;
+  repeated ChunkInfo chunks = 6;
+}
+
+// 块信息
+message ChunkInfo {
+  string chunk_id = 1;
+  string node_id = 2;
+  int64 offset = 3;
+  int64 size = 4;
+} 

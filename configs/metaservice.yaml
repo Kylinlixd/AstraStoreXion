@@ -1,0 +1,40 @@
+# 元数据服务配置
+server:
+  port: 9000
+  max_connections: 1000
+
+# 数据库配置
+database:
+  type: "mysql"
+  host: "localhost"
+  port: 3306
+  username: "astrastore"
+  password: "astrastore_password"
+  database: "astrastore"
+  max_open_conns: 100
+  max_idle_conns: 10
+  conn_max_lifetime: 3600s
+
+# etcd配置
+etcd:
+  endpoints:
+    - "localhost:2379"
+  dial_timeout: 5s
+  username: ""
+  password: ""
+
+# 服务发现
+consul:
+  address: "localhost:8500"
+  register_name: "meta-service"
+
+# 日志配置
+log:
+  level: "info"
+  path: "logs/meta-service.log"
+
+# 分布式锁配置
+lock:
+  lease_ttl: 5s
+  retry_interval: 1s
+  retry_times: 3 

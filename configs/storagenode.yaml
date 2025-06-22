@@ -1,0 +1,52 @@
+# 存储节点配置
+server:
+  port: 9100
+  max_connections: 1000
+
+# 存储配置
+storage:
+  data_path: "data"
+  disk_quota: 100GB
+  chunk_size: 4MB  # 块大小
+  
+# Raft配置
+raft:
+  heartbeat_timeout: 1000  # 毫秒
+  election_timeout: 3000   # 毫秒
+  pre_vote: true
+  data_dir: "raft_data"
+  
+# 集群配置
+cluster:
+  peers:
+    - node_id: "node1"
+      address: "localhost:9101"
+    - node_id: "node2"
+      address: "localhost:9102"
+    - node_id: "node3"
+      address: "localhost:9103"
+
+# 心跳配置
+heartbeat:
+  ttl: 3s
+  
+# 服务发现
+consul:
+  address: "localhost:8500"
+  register_name: "storage-node"
+
+# 监控配置
+monitoring:
+  prometheus_port: 9200
+  
+# 日志配置
+log:
+  level: "info"
+  path: "logs/storage-node.log"
+
+# 数据平衡配置
+balance:
+  check_interval: 300  # 秒
+  disk_usage_threshold: 80.0  # 百分比
+  load_factor_threshold: 1.2
+  enable_auto_balance: true 
