@@ -1,4 +1,4 @@
-.PHONY: all build clean test run docker-build
+.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway metaservice storagenode client docker-build dev-start dev-stop help
 
 # 默认目标
 all: build
@@ -39,8 +39,38 @@ client:
 
 # 运行测试
 test:
-	@echo "运行测试..."
+	@echo "运行所有测试..."
 	@go test -v ./...
+
+# 运行单元测试
+test-unit:
+	@echo "运行单元测试..."
+	@go test -v ./test/unit/...
+
+# 运行集成测试
+test-integration:
+	@echo "运行集成测试..."
+	@go test -v ./test/integration/...
+
+# 运行基准测试
+bench:
+	@echo "运行基准测试..."
+	@go test -bench=. -benchmem ./...
+
+# 运行测试覆盖率
+cover:
+	@echo "运行测试覆盖率分析..."
+	@go test -cover -coverprofile=coverage.out ./...
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "测试覆盖率报告已生成: coverage.html"
+
+# 生成Protocol Buffers代码
+gen-proto:
+	@echo "生成Protocol Buffers代码..."
+	@protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		pkg/api/*.proto
+	@echo "Protocol Buffers代码生成完成！"
 
 # 清理构建文件
 clean:
@@ -76,6 +106,11 @@ help:
 	@echo "  make storagenode     - 只构建存储节点"
 	@echo "  make client          - 只构建客户端工具"
 	@echo "  make test            - 运行所有测试"
+	@echo "  make test-unit       - 只运行单元测试"
+	@echo "  make test-integration - 只运行集成测试"
+	@echo "  make bench           - 运行基准测试"
+	@echo "  make cover           - 生成测试覆盖率报告"
+	@echo "  make gen-proto       - 生成Protocol Buffers代码"
 	@echo "  make clean           - 清理构建文件"
 	@echo "  make docker-build    - 构建Docker镜像"
 	@echo "  make dev-start       - 启动开发环境"
