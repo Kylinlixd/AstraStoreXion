@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 
 # 构建API网关
 echo "构建API网关..."
-go build -o bin/apigateway ./cmd/apigateway
+go build -o bin/apigateway ./core/apigateway
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}API网关构建成功${NC}"
 else
@@ -28,7 +28,7 @@ fi
 
 # 构建元数据服务
 echo "构建元数据服务..."
-go build -o bin/metaservice ./cmd/metaservice
+go build -o bin/metaservice ./core/metaservice
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}元数据服务构建成功${NC}"
 else
@@ -38,7 +38,7 @@ fi
 
 # 构建存储节点
 echo "构建存储节点..."
-go build -o bin/storagenode ./cmd/storagenode
+go build -o bin/storagenode ./core/storagenode
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}存储节点构建成功${NC}"
 else

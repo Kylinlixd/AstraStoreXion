@@ -1,0 +1,37 @@
+{
+  "name": "astrastore-xion-client",
+  "version": "1.0.0",
+  "description": "星辰离子X分布式文件存储系统的NodeJS客户端",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "storage",
+    "distributed",
+    "file",
+    "astrastore",
+    "xion"
+  ],
+  "author": "AstraStore",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "form-data": "^4.0.0",
+    "yaml": "^2.3.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.6",
+    "@types/node": "^20.8.10",
+    "@typescript-eslint/eslint-plugin": "^6.9.1",
+    "@typescript-eslint/parser": "^6.9.1",
+    "eslint": "^8.52.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.2.2"
+  }
+} 

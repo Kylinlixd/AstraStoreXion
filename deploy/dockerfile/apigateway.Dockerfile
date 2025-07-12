@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # 构建应用
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o apigateway ./cmd/apigateway
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o apigateway ./core/apigateway
 
 # 使用scratch作为基础镜像
 FROM alpine:latest

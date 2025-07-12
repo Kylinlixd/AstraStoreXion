@@ -29,13 +29,13 @@ func main() {
 	router := mux.NewRouter()
 
 	// 注册路由
-	router.HandleFunc("/api/v1/files", uploadFileHandler).Methods("POST")
-	router.HandleFunc("/api/v1/files/{id}", downloadFileHandler).Methods("GET")
-	router.HandleFunc("/api/v1/files/{id}", deleteFileHandler).Methods("DELETE")
-	router.HandleFunc("/api/v1/files/{id}/status", getFileStatusHandler).Methods("GET")
+	router.HandleFunc("/api/v1/files", uploadFile).Methods("POST")
+	router.HandleFunc("/api/v1/files/{id}", downloadFile).Methods("GET")
+	router.HandleFunc("/api/v1/files/{id}", deleteFile).Methods("DELETE")
+	router.HandleFunc("/api/v1/files/{id}/status", getFileStatus).Methods("GET")
 
 	// 健康检查
-	router.HandleFunc("/health", healthCheckHandler).Methods("GET")
+	router.HandleFunc("/health", healthCheck).Methods("GET")
 
 	// 设置服务器
 	server := &http.Server{
@@ -67,34 +67,4 @@ func main() {
 	}
 
 	log.Println("服务器已关闭")
-}
-
-// 处理文件上传
-func uploadFileHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现文件上传处理
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// 处理文件下载
-func downloadFileHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现文件下载处理
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// 处理文件删除
-func deleteFileHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现文件删除处理
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// 处理获取文件状态
-func getFileStatusHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现获取文件状态处理
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// 健康检查
-func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("API Gateway is healthy"))
 }

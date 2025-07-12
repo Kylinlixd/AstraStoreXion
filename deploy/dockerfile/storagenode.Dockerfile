@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # 构建应用
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o storagenode ./cmd/storagenode
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o storagenode ./core/storagenode
 
 # 使用scratch作为基础镜像
 FROM alpine:latest

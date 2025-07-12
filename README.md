@@ -24,7 +24,7 @@
 
 ```
 AstraStoreXion/
-├── cmd/                 # 应用程序入口点
+├── core/                # 应用程序入口点
 │   ├── apigateway/      # API网关程序入口
 │   ├── metaservice/     # 元数据服务程序入口
 │   └── storagenode/     # 存储节点程序入口
