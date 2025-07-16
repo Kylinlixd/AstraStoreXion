@@ -70,7 +70,8 @@ func (n *HashicorpRaftNode) Start(ctx context.Context) error {
 	config.LocalID = raft.ServerID(n.config.NodeID)
 	config.HeartbeatTimeout = time.Duration(n.config.HeartbeatTimeout) * time.Millisecond
 	config.ElectionTimeout = time.Duration(n.config.ElectionTimeout) * time.Millisecond
-	config.PreVote = n.config.PreVote
+	// 移除PreVote配置，新版本可能不支持
+	// config.PreVote = n.config.PreVote
 
 	// 创建日志存储
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(n.config.DataDir, "raft-log.bolt"))
@@ -289,12 +290,17 @@ func (n *HashicorpRaftNode) GetState() RaftState {
 	}
 
 	// 获取当前任期和最后日志索引
-	state.Term = n.raft.Term()
-	state.LastIndex = n.raft.LastIndex()
-	state.CommitIndex = n.raft.CommitIndex()
+	// 使用GetConfiguration获取状态信息
+	configFuture := n.raft.GetConfiguration()
+	if err := configFuture.Error(); err == nil {
+		// 无法直接获取Term，设置为0
+		state.Term = 0
+		state.LastIndex = n.raft.LastIndex()
+		state.CommitIndex = n.raft.CommitIndex()
+	}
 
 	// 获取所有节点
-	configFuture := n.raft.GetConfiguration()
+	configFuture = n.raft.GetConfiguration()
 	if err := configFuture.Error(); err == nil {
 		for _, server := range configFuture.Configuration().Servers {
 			state.Peers = append(state.Peers, string(server.ID))
