@@ -117,7 +117,7 @@ AstraStoreXion/
 
 1. 克隆仓库
 ```bash
-git clone https://github.com/astrastore/astrastore-xion.git
+git clone https://github.com/Kylinlixd/AstraStoreXion.git
 cd astrastore-xion
 ```
 
