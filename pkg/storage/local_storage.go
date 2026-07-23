@@ -8,9 +8,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"syscall"
 	"time"
+)
+
+var (
+	ErrInvalidChunkID = errors.New("无效的数据块ID")
+	ErrChunkNotFound  = errors.New("数据块不存在")
+
+	validChunkID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
 // LocalStorageNode 本地存储节点实现
@@ -61,8 +69,10 @@ func (n *LocalStorageNode) WriteChunk(ctx context.Context, chunkID string, data 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// 构造块文件路径
-	chunkPath := filepath.Join(n.config.DataPath, chunkID)
+	chunkPath, err := n.chunkPath(chunkID)
+	if err != nil {
+		return err
+	}
 
 	// 创建父目录
 	dir := filepath.Dir(chunkPath)
@@ -104,12 +114,17 @@ func (n *LocalStorageNode) ReadChunk(ctx context.Context, chunkID string) ([]byt
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
-	// 构造块文件路径
-	chunkPath := filepath.Join(n.config.DataPath, chunkID)
+	chunkPath, err := n.chunkPath(chunkID)
+	if err != nil {
+		return nil, err
+	}
 
 	// 打开文件
 	file, err := os.Open(chunkPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrChunkNotFound, chunkID)
+		}
 		return nil, fmt.Errorf("打开文件失败: %v", err)
 	}
 	defer file.Close()
@@ -134,8 +149,10 @@ func (n *LocalStorageNode) DeleteChunk(ctx context.Context, chunkID string) erro
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// 构造块文件路径
-	chunkPath := filepath.Join(n.config.DataPath, chunkID)
+	chunkPath, err := n.chunkPath(chunkID)
+	if err != nil {
+		return err
+	}
 
 	// 删除文件
 	if err := os.Remove(chunkPath); err != nil && !os.IsNotExist(err) {
@@ -143,6 +160,28 @@ func (n *LocalStorageNode) DeleteChunk(ctx context.Context, chunkID string) erro
 	}
 
 	return nil
+}
+
+func (n *LocalStorageNode) chunkPath(chunkID string) (string, error) {
+	if !validChunkID.MatchString(chunkID) {
+		return "", fmt.Errorf("%w: %s", ErrInvalidChunkID, chunkID)
+	}
+
+	base, err := filepath.Abs(n.config.DataPath)
+	if err != nil {
+		return "", fmt.Errorf("解析数据目录失败: %v", err)
+	}
+
+	path := filepath.Join(base, chunkID)
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return "", fmt.Errorf("解析数据块路径失败: %v", err)
+	}
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) || len(rel) >= 3 && rel[:3] == "../" {
+		return "", fmt.Errorf("%w: %s", ErrInvalidChunkID, chunkID)
+	}
+
+	return path, nil
 }
 
 // GetStatus 获取节点状态

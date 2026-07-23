@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/auth"
+	"github.com/astrastore/astrastore-xion/pkg/files"
+	"github.com/astrastore/astrastore-xion/pkg/metadata"
 	"github.com/astrastore/astrastore-xion/pkg/monitor"
+	"github.com/astrastore/astrastore-xion/pkg/storage"
 	"github.com/gorilla/mux"
 )
 
@@ -32,6 +35,7 @@ func main() {
 
 	// 初始化认证和授权
 	initAuthSystem()
+	initFileService("data/files")
 
 	// 初始化监控
 	var mon monitor.Monitor
@@ -96,6 +100,7 @@ func main() {
 	// 文件路由
 	fileRouter := router.PathPrefix("/api/v1/files").Subrouter()
 	fileRouter.HandleFunc("", uploadFile).Methods("POST")
+	fileRouter.HandleFunc("", listFiles).Methods("GET")
 	fileRouter.HandleFunc("/{id}", downloadFile).Methods("GET")
 	fileRouter.HandleFunc("/{id}", deleteFile).Methods("DELETE")
 	fileRouter.HandleFunc("/{id}/status", getFileStatus).Methods("GET")
@@ -186,6 +191,23 @@ func initAuthSystem() {
 	jwtAuth.RegisterUser(normalUser, "user123")
 
 	log.Printf("认证系统初始化完成，已添加测试用户")
+}
+
+func initFileService(dataPath string) {
+	store, err := storage.NewLocalStorageNode(storage.StorageConfig{
+		NodeID:   "local-node",
+		DataPath: dataPath,
+	})
+	if err != nil {
+		log.Fatalf("初始化文件存储失败: %v", err)
+	}
+
+	fileService = files.NewService(
+		store,
+		metadata.NewInMemoryMetadataService(),
+		files.WithNodeID("local-node"),
+	)
+	log.Printf("文件服务初始化完成，数据目录: %s", dataPath)
 }
 
 // 创建指标中间件

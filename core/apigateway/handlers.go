@@ -2,20 +2,24 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/auth"
+	"github.com/astrastore/astrastore-xion/pkg/files"
 	"github.com/gorilla/mux"
 )
 
 var (
 	authenticator auth.Authenticator
 	authorizer    auth.Authorizer
+	fileService   *files.Service
 )
 
 // 上传文件处理函数
@@ -49,40 +53,39 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 读取文件内容（实际项目中可能需要分块处理）
-	_, err = io.ReadAll(file)
-	if err != nil {
-		handleError(w, "读取文件失败", err, http.StatusInternalServerError)
-		return
-	}
-
 	// 解析元数据
-	metadata := make(map[string]string)
+	fileMetadata := make(map[string]string)
 	if metadataStr := r.FormValue("metadata"); metadataStr != "" {
-		if err := json.Unmarshal([]byte(metadataStr), &metadata); err != nil {
+		if err := json.Unmarshal([]byte(metadataStr), &fileMetadata); err != nil {
 			handleError(w, "解析元数据失败", err, http.StatusBadRequest)
 			return
 		}
 	}
 
-	// 添加基本元数据
-	metadata["filename"] = header.Filename
-	metadata["content_type"] = header.Header.Get("Content-Type")
-	metadata["size"] = fmt.Sprintf("%d", header.Size)
-	metadata["upload_time"] = time.Now().Format(time.RFC3339)
-	metadata["uploaded_by"] = user.Username
-
-	// TODO: 调用元数据服务创建文件元数据
-	// TODO: 将文件内容分割成块，并调用存储服务进行存储
-
-	// 生成文件ID（实际应由元数据服务生成）
-	fileID := fmt.Sprintf("file-%d", time.Now().UnixNano())
+	service := ensureFileService()
+	created, err := service.Upload(r.Context(), files.UploadInput{
+		Name:        header.Filename,
+		ContentType: header.Header.Get("Content-Type"),
+		OwnerID:     user.ID,
+		Reader:      file,
+	})
+	if err != nil {
+		handleError(w, "保存文件失败", err, http.StatusInternalServerError)
+		return
+	}
 
 	// 返回成功响应
 	resp := map[string]interface{}{
-		"file_id": fileID,
-		"success": true,
-		"message": "文件上传成功",
+		"file_id":      created.ID,
+		"id":           created.ID,
+		"name":         created.Name,
+		"size":         created.Size,
+		"checksum":     created.Checksum,
+		"content_type": created.ContentType,
+		"created_at":   created.CreatedAt.Format(time.RFC3339),
+		"download_url": fmt.Sprintf("/api/v1/files/%s", created.ID),
+		"success":      true,
+		"message":      "文件上传成功",
 	}
 
 	respondJSON(w, resp, http.StatusOK)
@@ -112,21 +115,24 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: 调用元数据服务获取文件元数据
-	// TODO: 根据元数据从存储节点读取文件块
-
-	// 模拟文件数据（实际应从存储节点读取）
-	fileData := []byte("这是文件内容模拟数据")
-	filename := "example.txt"
-	contentType := "text/plain"
+	download, err := ensureFileService().Download(r.Context(), fileID)
+	if err != nil {
+		if errors.Is(err, files.ErrNotFound) {
+			handleError(w, "文件不存在", err, http.StatusNotFound)
+			return
+		}
+		handleError(w, "读取文件失败", err, http.StatusInternalServerError)
+		return
+	}
+	defer download.Content.Close()
 
 	// 设置响应头
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(fileData)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", download.File.Name))
+	w.Header().Set("Content-Type", download.File.ContentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", download.File.Size))
 
 	// 写入文件内容
-	if _, err := w.Write(fileData); err != nil {
+	if _, err := io.Copy(w, download.Content); err != nil {
 		log.Printf("写入响应失败: %v", err)
 	}
 }
@@ -155,8 +161,14 @@ func deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: 调用元数据服务删除文件元数据
-	// TODO: 调用存储服务删除文件块
+	if err := ensureFileService().Delete(r.Context(), fileID); err != nil {
+		if errors.Is(err, files.ErrNotFound) {
+			handleError(w, "文件不存在", err, http.StatusNotFound)
+			return
+		}
+		handleError(w, "删除文件失败", err, http.StatusInternalServerError)
+		return
+	}
 
 	// 返回成功响应
 	resp := map[string]interface{}{
@@ -191,22 +203,66 @@ func getFileStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: 调用元数据服务获取文件状态
+	file, err := ensureFileService().Status(r.Context(), fileID)
+	if err != nil {
+		if errors.Is(err, files.ErrNotFound) {
+			handleError(w, "文件不存在", err, http.StatusNotFound)
+			return
+		}
+		handleError(w, "获取文件状态失败", err, http.StatusInternalServerError)
+		return
+	}
 
-	// 模拟文件状态（实际应从元数据服务获取）
 	fileStatus := map[string]interface{}{
-		"file_id":  fileID,
-		"filename": "example.txt",
-		"size":     1024,
-		"status":   "available",
+		"file_id":      file.ID,
+		"id":           file.ID,
+		"filename":     file.Name,
+		"name":         file.Name,
+		"size":         file.Size,
+		"checksum":     file.Checksum,
+		"content_type": file.ContentType,
+		"status":       file.Status,
+		"created_at":   file.CreatedAt.Format(time.RFC3339),
 		"metadata": map[string]string{
-			"content_type": "text/plain",
+			"content_type": file.ContentType,
 			"created_by":   user.Username,
-			"upload_time":  time.Now().Format(time.RFC3339),
 		},
 	}
 
 	respondJSON(w, fileStatus, http.StatusOK)
+}
+
+func listFiles(w http.ResponseWriter, r *http.Request) {
+	user, err := getUserFromRequest(r)
+	if err != nil {
+		handleError(w, "认证失败", err, http.StatusUnauthorized)
+		return
+	}
+
+	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.ReadPermission, "files")
+	if err != nil || !hasPermission {
+		handleError(w, "权限不足", err, http.StatusForbidden)
+		return
+	}
+
+	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
+	if limit > 100 {
+		limit = 100
+	}
+	offset := parsePositiveInt(r.URL.Query().Get("offset"), 0)
+
+	listed, err := ensureFileService().List(r.Context(), limit, offset)
+	if err != nil {
+		handleError(w, "列出文件失败", err, http.StatusInternalServerError)
+		return
+	}
+
+	respondJSON(w, map[string]interface{}{
+		"files":   listed,
+		"limit":   limit,
+		"offset":  offset,
+		"success": true,
+	}, http.StatusOK)
 }
 
 // 登录处理函数
@@ -333,4 +389,22 @@ func handleError(w http.ResponseWriter, message string, err error, statusCode in
 	}
 
 	respondJSON(w, resp, statusCode)
+}
+
+func ensureFileService() *files.Service {
+	if fileService == nil {
+		initFileService("data/files")
+	}
+	return fileService
+}
+
+func parsePositiveInt(value string, fallback int) int {
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
