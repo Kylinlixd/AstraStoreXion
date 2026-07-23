@@ -82,3 +82,22 @@ func TestPrometheusMonitorRecordsMetrics(t *testing.T) {
 		})
 	}
 }
+
+func TestPrometheusMonitorAddsGaugeDelta(t *testing.T) {
+	monitor := NewPrometheusMonitor(MonitorConfig{})
+
+	if err := monitor.RegisterMetric(MetricDefinition{
+		Name: "test_active_requests",
+		Type: GaugeMetric,
+		Help: "test active requests",
+	}); err != nil {
+		t.Fatalf("RegisterMetric() error = %v", err)
+	}
+
+	if err := monitor.AddGauge("test_active_requests", 1, nil); err != nil {
+		t.Fatalf("AddGauge(+1) error = %v", err)
+	}
+	if err := monitor.AddGauge("test_active_requests", -1, nil); err != nil {
+		t.Fatalf("AddGauge(-1) error = %v", err)
+	}
+}

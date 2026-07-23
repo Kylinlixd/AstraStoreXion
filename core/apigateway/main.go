@@ -193,8 +193,8 @@ func createMetricsMiddleware(mon monitor.Monitor) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// 增加活跃请求计数
-			mon.SetGauge("apigateway_active_requests", 1, nil)
-			defer mon.SetGauge("apigateway_active_requests", -1, nil)
+			mon.AddGauge("apigateway_active_requests", 1, nil)
+			defer mon.AddGauge("apigateway_active_requests", -1, nil)
 
 			// 记录开始时间
 			start := time.Now()
