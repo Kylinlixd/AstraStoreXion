@@ -1,178 +1,209 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""Production HTTP client for AstraStoreXion."""
 
-import os
-import time
 import json
+import mimetypes
+import time
+from typing import BinaryIO, Dict, Optional, Tuple, Union
+
 import requests
-from typing import Dict, BinaryIO, Optional, Union, Any
 
 from .config import XionConfig
-from .models import UploadFileResponse, DeleteFileResponse, FileStatusResponse
+from .models import (
+    DeleteFileResponse,
+    FileListResponse,
+    FileResponse,
+    FileStatusResponse,
+    UploadFileResponse,
+)
+
+
+class XionError(Exception):
+    """Base error for storage client failures."""
+
+
+class XionUnavailableError(XionError):
+    """The storage service could not be reached after safe retries."""
+
+
+class XionHTTPError(XionError):
+    """A structured non-success response from the storage service."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
 
 
 class XionClient:
-    """星辰离子X客户端"""
+    """Small synchronous client intended for trusted backend services."""
 
-    def __init__(self, config: Optional[XionConfig] = None):
-        """
-        初始化客户端
-        
-        Args:
-            config: 客户端配置，如果为None则使用默认配置
-        """
+    transient_statuses = frozenset({502, 503, 504})
+
+    def __init__(self, config: Optional[XionConfig] = None) -> None:
         self.config = config or XionConfig()
         self.session = requests.Session()
-        
-        # 设置会话参数
         self.session.headers.update({
-            'User-Agent': 'XionClient/Python/1.0.0',
-            'Accept': 'application/json',
+            "User-Agent": "AstraStoreXion-Python/1.1",
+            "Accept": "application/json",
         })
+        if self.config.service_token:
+            self.session.headers["Authorization"] = (
+                "Bearer " + self.config.service_token
+            )
 
     def upload_file(
-            self, 
-            file: Union[BinaryIO, bytes], 
-            filename: str, 
-            metadata: Optional[Dict[str, str]] = None
-        ) -> UploadFileResponse:
-        """
-        上传文件
-        
-        Args:
-            file: 文件内容或文件对象
-            filename: 文件名
-            metadata: 元数据，键值对
-            
-        Returns:
-            UploadFileResponse: 上传响应
-        """
-        files = {'file': (filename, file)}
-        
-        data = {}
-        if metadata:
-            data['metadata'] = json.dumps(metadata)
-        
-        url = f"{self.config.api_gateway}/api/v1/files"
-        
-        response = self._make_request(
-            'POST',
-            url,
-            files=files,
-            data=data
+        self,
+        file: Union[BinaryIO, bytes],
+        filename: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> UploadFileResponse:
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        response = self._request(
+            "POST",
+            "/api/v1/files",
+            expected=(201,),
+            retry=False,
+            files={"file": (filename, file, content_type)},
+            data={"metadata": json.dumps(metadata or {}, ensure_ascii=False)},
         )
-        
-        return UploadFileResponse.from_dict(response)
+        try:
+            return FileResponse.from_dict(self._json(response))
+        finally:
+            response.close()
 
     def download_file(self, file_id: str, output: BinaryIO) -> None:
-        """
-        下载文件
-        
-        Args:
-            file_id: 文件ID
-            output: 输出流
-            
-        Returns:
-            None
-        """
-        url = f"{self.config.api_gateway}/api/v1/files/{file_id}"
-        
-        with self.session.get(
-            url,
+        response = self._request(
+            "GET",
+            "/api/v1/files/" + file_id,
+            expected=(200,),
+            retry=True,
             stream=True,
-            timeout=self.config.timeout / 1000  # 转换为秒
-        ) as response:
-            response.raise_for_status()
-            
-            # 按块读取并写入
-            for chunk in response.iter_content(chunk_size=self.config.chunk_size):
-                if chunk:  # 过滤掉keep-alive包
-                    output.write(chunk)
+        )
+        try:
+            try:
+                for chunk in response.iter_content(chunk_size=self.config.chunk_size):
+                    if chunk:
+                        output.write(chunk)
+            except requests.RequestException as error:
+                raise XionUnavailableError(str(error)) from error
+        finally:
+            response.close()
 
     def delete_file(self, file_id: str) -> DeleteFileResponse:
-        """
-        删除文件
-        
-        Args:
-            file_id: 文件ID
-            
-        Returns:
-            DeleteFileResponse: 删除响应
-        """
-        url = f"{self.config.api_gateway}/api/v1/files/{file_id}"
-        
-        response = self._make_request('DELETE', url)
-        
-        return DeleteFileResponse.from_dict(response)
+        response = self._request(
+            "DELETE",
+            "/api/v1/files/" + file_id,
+            expected=(204,),
+            retry=True,
+        )
+        response.close()
+        return DeleteFileResponse(success=True, message="deleted")
 
     def get_file_status(self, file_id: str) -> FileStatusResponse:
-        """
-        获取文件状态
-        
-        Args:
-            file_id: 文件ID
-            
-        Returns:
-            FileStatusResponse: 文件状态
-        """
-        url = f"{self.config.api_gateway}/api/v1/files/{file_id}/status"
-        
-        response = self._make_request('GET', url)
-        
-        return FileStatusResponse.from_dict(response)
+        response = self._request(
+            "GET",
+            "/api/v1/files/" + file_id + "/status",
+            expected=(200,),
+            retry=True,
+        )
+        try:
+            return FileResponse.from_dict(self._json(response))
+        finally:
+            response.close()
+
+    def list_files(self, limit: int = 100, offset: int = 0) -> FileListResponse:
+        response = self._request(
+            "GET",
+            "/api/v1/files",
+            expected=(200,),
+            retry=True,
+            params={"limit": limit, "offset": offset},
+        )
+        try:
+            return FileListResponse.from_dict(self._json(response))
+        finally:
+            response.close()
+
+    def health(self) -> str:
+        response = self._request(
+            "GET", "/health", expected=(200,), retry=True
+        )
+        try:
+            return str(self._json(response).get("status", ""))
+        finally:
+            response.close()
 
     def close(self) -> None:
-        """
-        关闭客户端
-        
-        Returns:
-            None
-        """
         self.session.close()
 
-    def _make_request(self, method: str, url: str, **kwargs) -> Dict:
-        """
-        发送请求
-        
-        Args:
-            method: HTTP方法
-            url: 请求URL
-            **kwargs: 请求参数
-            
-        Returns:
-            Dict: 响应数据
-            
-        Raises:
-            requests.exceptions.HTTPError: HTTP错误
-        """
-        kwargs.setdefault('timeout', self.config.timeout / 1000)  # 转换为秒
-        
-        retry_count = 0
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expected: Tuple[int, ...],
+        retry: bool,
+        **kwargs,
+    ):
+        attempts = self.config.max_retries + 1 if retry else 1
         last_exception = None
-        
-        while retry_count <= self.config.max_retries:
+        for attempt in range(attempts):
             try:
-                response = self.session.request(method, url, **kwargs)
-                response.raise_for_status()
-                return response.json()
-            except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                last_exception = e
-                retry_count += 1
-                
-                if retry_count <= self.config.max_retries:
-                    # 等待后重试
-                    time.sleep(self.config.retry_interval / 1000)  # 转换为秒
-                    continue
-                break
-        
-        # 重试次数用尽，抛出最后一个异常
-        if last_exception:
-            raise last_exception
-        
-        raise requests.exceptions.RequestException("请求失败，原因未知")
+                response = self.session.request(
+                    method,
+                    self.config.api_gateway + path,
+                    timeout=self.config.request_timeout,
+                    **kwargs,
+                )
+            except requests.RequestException as error:
+                last_exception = error
+                if attempt + 1 >= attempts:
+                    raise XionUnavailableError(str(error)) from error
+                self._wait(attempt)
+                continue
 
-    def __enter__(self) -> 'XionClient':
+            if response.status_code in expected:
+                return response
+            if retry and response.status_code in self.transient_statuses and attempt + 1 < attempts:
+                response.close()
+                self._wait(attempt)
+                continue
+            error = self._http_error(response)
+            response.close()
+            raise error
+
+        raise XionUnavailableError(str(last_exception or "request failed"))
+
+    def _wait(self, attempt: int) -> None:
+        time.sleep(self.config.retry_interval * (attempt + 1))
+
+    @staticmethod
+    def _json(response) -> Dict:
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError) as error:
+            raise XionError("storage service returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise XionError("storage service returned a non-object JSON response")
+        return payload
+
+    @classmethod
+    def _http_error(cls, response) -> XionHTTPError:
+        code = "http_error"
+        message = "storage request failed with HTTP {}".format(response.status_code)
+        try:
+            payload = response.json()
+            detail = payload.get("error", {}) if isinstance(payload, dict) else {}
+            if isinstance(detail, dict):
+                code = str(detail.get("code", code))
+                message = str(detail.get("message", message))
+        except (ValueError, json.JSONDecodeError):
+            pass
+        return XionHTTPError(response.status_code, code, message)
+
+    def __enter__(self) -> "XionClient":
         return self
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close() 
+        self.close()

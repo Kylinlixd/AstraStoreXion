@@ -1,410 +1,317 @@
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/astrastore/astrastore-xion/pkg/auth"
 	"github.com/astrastore/astrastore-xion/pkg/files"
 	"github.com/gorilla/mux"
 )
 
-var (
-	authenticator auth.Authenticator
-	authorizer    auth.Authorizer
-	fileService   *files.Service
-)
+var errFileTooLarge = errors.New("file exceeds configured upload limit")
 
-// 上传文件处理函数
-func uploadFile(w http.ResponseWriter, r *http.Request) {
-	// 验证权限
-	user, err := getUserFromRequest(r)
-	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
-		return
-	}
+type fileService interface {
+	Upload(context.Context, files.UploadInput) (files.File, error)
+	Download(context.Context, string) (files.File, io.ReadCloser, error)
+	Status(context.Context, string) (files.File, error)
+	List(context.Context, int, int) ([]files.File, error)
+	Delete(context.Context, string) error
+	Ready(context.Context) error
+}
 
-	// 检查权限
-	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.WritePermission, "files")
-	if err != nil || !hasPermission {
-		handleError(w, "权限不足", err, http.StatusForbidden)
-		return
-	}
+type gateway struct {
+	service        fileService
+	token          string
+	maxUploadBytes int64
+}
 
-	// 解析多部分表单
-	err = r.ParseMultipartForm(32 << 20) // 32MB 限制
-	if err != nil {
-		handleError(w, "解析表单失败", err, http.StatusBadRequest)
-		return
-	}
+type fileListResponse struct {
+	Count   int          `json:"count"`
+	Results []files.File `json:"results"`
+}
 
-	// 获取文件
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		handleError(w, "获取文件失败", err, http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
+type statusResponse struct {
+	Status string `json:"status"`
+}
 
-	// 解析元数据
-	fileMetadata := make(map[string]string)
-	if metadataStr := r.FormValue("metadata"); metadataStr != "" {
-		if err := json.Unmarshal([]byte(metadataStr), &fileMetadata); err != nil {
-			handleError(w, "解析元数据失败", err, http.StatusBadRequest)
+type apiError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type apiErrorResponse struct {
+	Error apiError `json:"error"`
+}
+
+func newRouter(g gateway) http.Handler {
+	router := mux.NewRouter()
+	router.HandleFunc("/health", g.health).Methods(http.MethodGet)
+	router.HandleFunc("/healthz", g.health).Methods(http.MethodGet)
+	router.HandleFunc("/ready", g.ready).Methods(http.MethodGet)
+	router.HandleFunc("/readyz", g.ready).Methods(http.MethodGet)
+
+	fileRouter := router.PathPrefix("/api/v1/files").Subrouter()
+	fileRouter.Use(g.authenticate)
+	fileRouter.HandleFunc("", g.upload).Methods(http.MethodPost)
+	fileRouter.HandleFunc("", g.list).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/{id}/status", g.status).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/{id}", g.download).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/{id}", g.delete).Methods(http.MethodDelete)
+	return router
+}
+
+func (g gateway) authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		const prefix = "Bearer "
+		header := request.Header.Get("Authorization")
+		provided := ""
+		if strings.HasPrefix(header, prefix) {
+			provided = strings.TrimPrefix(header, prefix)
+		}
+		if len(provided) != len(g.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(g.token)) != 1 {
+			writeError(writer, http.StatusUnauthorized, "unauthorized", "missing or invalid service token")
 			return
 		}
-	}
-
-	service := ensureFileService()
-	created, err := service.Upload(r.Context(), files.UploadInput{
-		Name:        header.Filename,
-		ContentType: header.Header.Get("Content-Type"),
-		OwnerID:     user.ID,
-		Reader:      file,
+		next.ServeHTTP(writer, request)
 	})
-	if err != nil {
-		handleError(w, "保存文件失败", err, http.StatusInternalServerError)
-		return
-	}
-
-	// 返回成功响应
-	resp := map[string]interface{}{
-		"file_id":      created.ID,
-		"id":           created.ID,
-		"name":         created.Name,
-		"size":         created.Size,
-		"checksum":     created.Checksum,
-		"content_type": created.ContentType,
-		"created_at":   created.CreatedAt.Format(time.RFC3339),
-		"download_url": fmt.Sprintf("/api/v1/files/%s", created.ID),
-		"success":      true,
-		"message":      "文件上传成功",
-	}
-
-	respondJSON(w, resp, http.StatusOK)
 }
 
-// 下载文件处理函数
-func downloadFile(w http.ResponseWriter, r *http.Request) {
-	// 验证权限
-	user, err := getUserFromRequest(r)
+func (g gateway) upload(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, g.maxUploadBytes+(1<<20))
+	multipartReader, err := request.MultipartReader()
 	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
+		writeError(writer, http.StatusBadRequest, "invalid_multipart", "request must contain a multipart file")
 		return
 	}
 
-	// 获取文件ID
-	vars := mux.Vars(r)
-	fileID := vars["id"]
-	if fileID == "" {
-		handleError(w, "缺少文件ID", nil, http.StatusBadRequest)
-		return
-	}
-
-	// 检查权限
-	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.ReadPermission, "files")
-	if err != nil || !hasPermission {
-		handleError(w, "权限不足", err, http.StatusForbidden)
-		return
-	}
-
-	download, err := ensureFileService().Download(r.Context(), fileID)
-	if err != nil {
-		if errors.Is(err, files.ErrNotFound) {
-			handleError(w, "文件不存在", err, http.StatusNotFound)
+	metadata := map[string]string{}
+	var created files.File
+	fileSeen := false
+	cleanupCreated := func() {
+		if created.ID == "" {
 			return
 		}
-		handleError(w, "读取文件失败", err, http.StatusInternalServerError)
-		return
-	}
-	defer download.Content.Close()
-
-	// 设置响应头
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", download.File.Name))
-	w.Header().Set("Content-Type", download.File.ContentType)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", download.File.Size))
-
-	// 写入文件内容
-	if _, err := io.Copy(w, download.Content); err != nil {
-		log.Printf("写入响应失败: %v", err)
-	}
-}
-
-// 删除文件处理函数
-func deleteFile(w http.ResponseWriter, r *http.Request) {
-	// 验证权限
-	user, err := getUserFromRequest(r)
-	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
-		return
+		if err := g.service.Delete(request.Context(), created.ID); err != nil {
+			log.Printf("clean up rejected upload %s: %v", created.ID, err)
+		}
 	}
 
-	// 获取文件ID
-	vars := mux.Vars(r)
-	fileID := vars["id"]
-	if fileID == "" {
-		handleError(w, "缺少文件ID", nil, http.StatusBadRequest)
-		return
-	}
-
-	// 检查权限
-	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.DeletePermission, "files")
-	if err != nil || !hasPermission {
-		handleError(w, "权限不足", err, http.StatusForbidden)
-		return
-	}
-
-	if err := ensureFileService().Delete(r.Context(), fileID); err != nil {
-		if errors.Is(err, files.ErrNotFound) {
-			handleError(w, "文件不存在", err, http.StatusNotFound)
+	for {
+		part, err := multipartReader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			cleanupCreated()
+			writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
 			return
 		}
-		handleError(w, "删除文件失败", err, http.StatusInternalServerError)
-		return
-	}
-
-	// 返回成功响应
-	resp := map[string]interface{}{
-		"success": true,
-		"message": "文件删除成功",
-	}
-
-	respondJSON(w, resp, http.StatusOK)
-}
-
-// 获取文件状态处理函数
-func getFileStatus(w http.ResponseWriter, r *http.Request) {
-	// 验证权限
-	user, err := getUserFromRequest(r)
-	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
-		return
-	}
-
-	// 获取文件ID
-	vars := mux.Vars(r)
-	fileID := vars["id"]
-	if fileID == "" {
-		handleError(w, "缺少文件ID", nil, http.StatusBadRequest)
-		return
-	}
-
-	// 检查权限
-	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.ReadPermission, "files")
-	if err != nil || !hasPermission {
-		handleError(w, "权限不足", err, http.StatusForbidden)
-		return
-	}
-
-	file, err := ensureFileService().Status(r.Context(), fileID)
-	if err != nil {
-		if errors.Is(err, files.ErrNotFound) {
-			handleError(w, "文件不存在", err, http.StatusNotFound)
+		if err != nil {
+			cleanupCreated()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains invalid multipart data")
 			return
 		}
-		handleError(w, "获取文件状态失败", err, http.StatusInternalServerError)
-		return
-	}
-
-	fileStatus := map[string]interface{}{
-		"file_id":      file.ID,
-		"id":           file.ID,
-		"filename":     file.Name,
-		"name":         file.Name,
-		"size":         file.Size,
-		"checksum":     file.Checksum,
-		"content_type": file.ContentType,
-		"status":       file.Status,
-		"created_at":   file.CreatedAt.Format(time.RFC3339),
-		"metadata": map[string]string{
-			"content_type": file.ContentType,
-			"created_by":   user.Username,
-		},
-	}
-
-	respondJSON(w, fileStatus, http.StatusOK)
-}
-
-func listFiles(w http.ResponseWriter, r *http.Request) {
-	user, err := getUserFromRequest(r)
-	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
-		return
-	}
-
-	hasPermission, err := authorizer.CheckPermission(r.Context(), user, auth.ReadPermission, "files")
-	if err != nil || !hasPermission {
-		handleError(w, "权限不足", err, http.StatusForbidden)
-		return
-	}
-
-	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
-	if limit > 100 {
-		limit = 100
-	}
-	offset := parsePositiveInt(r.URL.Query().Get("offset"), 0)
-
-	listed, err := ensureFileService().List(r.Context(), limit, offset)
-	if err != nil {
-		handleError(w, "列出文件失败", err, http.StatusInternalServerError)
-		return
-	}
-
-	respondJSON(w, map[string]interface{}{
-		"files":   listed,
-		"limit":   limit,
-		"offset":  offset,
-		"success": true,
-	}, http.StatusOK)
-}
-
-// 登录处理函数
-func login(w http.ResponseWriter, r *http.Request) {
-	// 解析请求体
-	var credentials struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
-		handleError(w, "解析请求失败", err, http.StatusBadRequest)
-		return
-	}
-
-	// 验证凭证
-	user, err := authenticator.Authenticate(r.Context(), credentials.Username, credentials.Password)
-	if err != nil {
-		handleError(w, "认证失败", err, http.StatusUnauthorized)
-		return
-	}
-
-	// 生成令牌
-	token, err := authenticator.GenerateToken(r.Context(), user)
-	if err != nil {
-		handleError(w, "生成令牌失败", err, http.StatusInternalServerError)
-		return
-	}
-
-	// 返回令牌
-	resp := map[string]interface{}{
-		"token":   token,
-		"user_id": user.ID,
-		"role":    user.Role,
-	}
-
-	respondJSON(w, resp, http.StatusOK)
-}
-
-// 刷新令牌处理函数
-func refreshToken(w http.ResponseWriter, r *http.Request) {
-	// 获取令牌
-	token := extractToken(r)
-	if token == "" {
-		handleError(w, "缺少令牌", nil, http.StatusUnauthorized)
-		return
-	}
-
-	// 刷新令牌
-	newToken, err := authenticator.RefreshToken(r.Context(), token)
-	if err != nil {
-		handleError(w, "刷新令牌失败", err, http.StatusUnauthorized)
-		return
-	}
-
-	// 返回新令牌
-	resp := map[string]interface{}{
-		"token": newToken,
-	}
-
-	respondJSON(w, resp, http.StatusOK)
-}
-
-// 健康检查处理函数
-func healthCheck(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现更复杂的健康检查逻辑
-	status := map[string]interface{}{
-		"status":    "ok",
-		"timestamp": time.Now().Format(time.RFC3339),
-		"version":   "1.0.0",
-	}
-
-	respondJSON(w, status, http.StatusOK)
-}
-
-// 从请求中获取用户
-func getUserFromRequest(r *http.Request) (*auth.User, error) {
-	// 提取令牌
-	token := extractToken(r)
-	if token == "" {
-		return nil, auth.ErrInvalidToken
-	}
-
-	// 验证令牌
-	return authenticator.ValidateToken(r.Context(), token)
-}
-
-// 提取令牌
-func extractToken(r *http.Request) string {
-	// 从Authorization头中提取
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		// Bearer Token
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			return authHeader[7:]
+		if fileSeen {
+			_ = part.Close()
+			cleanupCreated()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "multipart metadata must precede the file")
+			return
 		}
-		return authHeader
-	}
 
-	// 从查询参数中提取
-	return r.URL.Query().Get("token")
+		switch part.FormName() {
+		case "metadata":
+			encoded, err := readMultipartField(part, 64<<10)
+			_ = part.Close()
+			if err != nil || (encoded != "" && json.Unmarshal([]byte(encoded), &metadata) != nil) {
+				writeError(writer, http.StatusBadRequest, "invalid_metadata", "metadata must be a JSON object with string values")
+				return
+			}
+		case "file":
+			if part.FileName() == "" {
+				_ = part.Close()
+				writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
+				return
+			}
+			fileSeen = true
+			created, err = g.service.Upload(request.Context(), files.UploadInput{
+				Name:        part.FileName(),
+				ContentType: part.Header.Get("Content-Type"),
+				Metadata:    metadata,
+				Reader:      &uploadLimitReader{reader: part, remaining: g.maxUploadBytes},
+			})
+			closeErr := part.Close()
+			if errors.Is(err, errFileTooLarge) {
+				writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+				return
+			}
+			if err != nil {
+				handleServiceError(writer, err)
+				return
+			}
+			if closeErr != nil {
+				cleanupCreated()
+				writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains invalid multipart data")
+				return
+			}
+		default:
+			_ = part.Close()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains an unsupported multipart field")
+			return
+		}
+	}
+	if !fileSeen {
+		writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
+		return
+	}
+	writeJSON(writer, http.StatusCreated, created)
 }
 
-// 返回JSON响应
-func respondJSON(w http.ResponseWriter, data interface{}, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("写入JSON响应失败: %v", err)
-	}
-}
-
-// 处理错误
-func handleError(w http.ResponseWriter, message string, err error, statusCode int) {
-	errMsg := message
+func readMultipartField(reader io.Reader, limit int64) (string, error) {
+	value, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
-		log.Printf("%s: %v", message, err)
-		errMsg = fmt.Sprintf("%s: %v", message, err)
+		return "", err
 	}
-
-	resp := map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+	if int64(len(value)) > limit {
+		return "", errors.New("multipart field is too large")
 	}
-
-	respondJSON(w, resp, statusCode)
+	return string(value), nil
 }
 
-func ensureFileService() *files.Service {
-	if fileService == nil {
-		initFileService("data/files")
+func (g gateway) download(writer http.ResponseWriter, request *http.Request) {
+	stored, body, err := g.service.Download(request.Context(), mux.Vars(request)["id"])
+	if err != nil {
+		handleServiceError(writer, err)
+		return
 	}
-	return fileService
+	defer body.Close()
+	writer.Header().Set("Content-Type", stored.ContentType)
+	writer.Header().Set("Content-Length", strconv.FormatInt(stored.Size, 10))
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": stored.Name})
+	writer.Header().Set("Content-Disposition", disposition)
+	writer.Header().Set("ETag", `"sha256-`+stored.Checksum+`"`)
+	writer.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(writer, body); err != nil {
+		log.Printf("stream file %s: %v", stored.ID, err)
+	}
 }
 
-func parsePositiveInt(value string, fallback int) int {
+func (g gateway) status(writer http.ResponseWriter, request *http.Request) {
+	stored, err := g.service.Status(request.Context(), mux.Vars(request)["id"])
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, stored)
+}
+
+func (g gateway) list(writer http.ResponseWriter, request *http.Request) {
+	limit, err := queryInteger(request, "limit", 100)
+	if err != nil || limit < 1 || limit > 1000 {
+		writeError(writer, http.StatusBadRequest, "invalid_pagination", "limit must be between 1 and 1000")
+		return
+	}
+	offset, err := queryInteger(request, "offset", 0)
+	if err != nil || offset < 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_pagination", "offset must be zero or greater")
+		return
+	}
+	stored, err := g.service.List(request.Context(), limit, offset)
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Results: stored})
+}
+
+func (g gateway) delete(writer http.ResponseWriter, request *http.Request) {
+	if err := g.service.Delete(request.Context(), mux.Vars(request)["id"]); err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (g gateway) health(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, statusResponse{Status: "ok"})
+}
+
+func (g gateway) ready(writer http.ResponseWriter, request *http.Request) {
+	if err := g.service.Ready(request.Context()); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "not_ready", "storage is not ready")
+		return
+	}
+	writeJSON(writer, http.StatusOK, statusResponse{Status: "ready"})
+}
+
+func handleServiceError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, files.ErrInvalidID), errors.Is(err, files.ErrInvalidUpload):
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, files.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "not_found", "file does not exist")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeError(writer, http.StatusRequestTimeout, "request_timeout", "request was cancelled or timed out")
+	default:
+		log.Printf("file service error: %v", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "file operation failed")
+	}
+}
+
+func writeError(writer http.ResponseWriter, status int, code, message string) {
+	writeJSON(writer, status, apiErrorResponse{Error: apiError{Code: code, Message: message}})
+}
+
+func writeJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(status)
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		log.Printf("encode response: %v", err)
+	}
+}
+
+func queryInteger(request *http.Request, name string, defaultValue int) (int, error) {
+	value := request.URL.Query().Get(name)
 	if value == "" {
-		return fallback
+		return defaultValue, nil
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 0 {
-		return fallback
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
 	}
-	return parsed
+	return parsed, nil
+}
+
+type uploadLimitReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (r *uploadLimitReader) Read(buffer []byte) (int, error) {
+	if r.remaining < 0 {
+		return 0, errFileTooLarge
+	}
+	maximumRead := r.remaining + 1
+	if int64(len(buffer)) > maximumRead {
+		buffer = buffer[:maximumRead]
+	}
+	read, err := r.reader.Read(buffer)
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		err = errFileTooLarge
+	}
+	r.remaining -= int64(read)
+	if r.remaining < 0 {
+		return read, errFileTooLarge
+	}
+	return read, err
 }

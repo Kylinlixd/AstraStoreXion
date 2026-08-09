@@ -1,166 +1,102 @@
-# 星辰离子X (AstraStoreXion)
+# AstraStoreXion
 
-## 项目概述
+AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前生产可用形态为单节点：Go HTTP 服务负责文件字节、原始名称与 SHA-256，Django 负责公网认证和业务元数据，Vue 管理端提供上传进度和内置教程。
 
-星辰离子X是一个高性能分布式文件存储系统，旨在提高网站资源加载速度，支持水平扩展，保证高可用性和数据一致性，并实现低延迟读写。
+## 当前能力
 
-### 主要特点
+- 原子上传：对象与 JSON manifest 分离落盘，失败自动补偿。
+- 重启持久化：服务重启后可继续查询和下载。
+- 安全 ID：拒绝路径穿越和非法对象 ID。
+- 完整生命周期：上传、列表、状态、下载、幂等删除。
+- 服务端认证：常量时间比较 Bearer 服务密钥。
+- 50 MB 默认限制和结构化错误响应。
+- Python SDK 1.1：流式下载、安全重试和结构化异常。
+- systemd 最小权限部署与字节级 smoke test。
+- 博客双存储：新文件走 Xion，历史 `/media/` 保持可用。
 
-- **高性能**: 优化存储架构和读写策略，减少文件访问延迟
-- **水平扩展**: 支持通过添加存储节点来增加存储容量和处理能力
-- **高可用性**: 采用冗余存储和分布式协议，确保节点故障时数据不丢失
-- **数据一致性**: 使用Raft协议实现副本间的数据一致性
-- **低延迟读写**: 通过优化存储引擎和网络通信，减少读写操作响应时间
+仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
 
-## 技术栈
+## 快速开始
 
-- **通信框架**: gRPC + Protocol Buffers
-- **服务发现**: Consul
-- **分布式协调**: Etcd
-- **监控**: Prometheus + Grafana
-- **容器化部署**: Docker, Kubernetes
+要求 Go 1.23+、Python 3.9+、curl。
 
-## 项目结构
-
-```
-AstraStoreXion/
-├── core/                # 应用程序入口点
-│   ├── apigateway/      # API网关程序入口
-│   ├── metaservice/     # 元数据服务程序入口
-│   └── storagenode/     # 存储节点程序入口
-├── pkg/                 # 共享库
-│   ├── api/             # API定义（包含Protocol Buffers）
-│   ├── metadata/        # 元数据模块
-│   ├── storage/         # 存储引擎模块
-│   ├── balance/         # 数据平衡模块
-│   └── raft/            # Raft一致性模块
-├── client/              # 客户端SDK
-│   ├── go/              # Go客户端
-│   ├── java/            # Java客户端
-│   ├── nodejs/          # NodeJS客户端
-│   └── python/          # Python客户端
-├── configs/             # 配置文件
-├── scripts/             # 部署、测试脚本
-├── test/                # 测试代码
-│   ├── unit/            # 单元测试
-│   └── integration/     # 集成测试
-├── deploy/              # 部署配置
-│   ├── dockerfile/      # Docker镜像构建文件
-│   ├── mysql/           # MySQL数据库初始化脚本
-│   └── docker-compose.yaml  # Docker Compose配置
-└── docs/                # 文档
-```
-
-## 项目进展
-
-### 已完成功能
-
-- ✅ **核心架构设计**：三层架构（接入层、元数据层、存储层）
-- ✅ **API设计**：基于gRPC的文件服务API
-- ✅ **客户端SDK**：
-  - ✅ Go客户端：基本API实现
-  - ✅ Java客户端：基本API实现
-  - ✅ NodeJS客户端：基本API实现
-  - ✅ Python客户端：基本API实现
-- ✅ **存储引擎**：
-  - ✅ 本地存储引擎：支持块级存储和磁盘使用率监控
-  - ✅ 心跳监测：节点状态监控
-- ✅ **元数据服务**：
-  - ✅ 内存实现：用于开发和测试
-- ✅ **数据平衡**：
-  - ✅ 一致性哈希负载均衡器：节点添加/移除，数据分片
-  - ✅ 热点文件检测：文件访问统计与热点识别
-- ✅ **共识模块**：
-  - ✅ Raft协议实现：基于Hashicorp Raft
-  - ✅ 节点状态管理：Leader选举、日志复制
-- ✅ **测试框架**：
-  - ✅ 单元测试：核心模块测试
-  - ✅ 集成测试：存储节点测试
-- ✅ **文档**：
-  - ✅ 客户端使用文档
-  - ✅ 项目结构文档
-
-### 待完成功能
-
-- 🔄 **API网关改进**：
-  - 完善请求路由和负载均衡
-  - 添加认证与授权机制
-  - 实现请求限流与熔断
-- 🔄 **元数据服务持久化**：
-  - MySQL存储实现
-  - 元数据缓存层
-- 🔄 **存储引擎优化**：
-  - 数据压缩
-  - 垃圾回收机制
-  - 存储分层策略
-- 🔄 **数据平衡优化**：
-  - 自动化数据迁移实现
-  - 负载均衡策略调优
-- 🔄 **监控系统**：
-  - Prometheus + Grafana监控集成
-  - 系统性能指标收集
-  - 告警机制
-- 🔄 **安全机制**：
-  - 数据加密
-  - 访问控制
-  - 审计日志
-- 🔄 **容灾备份**：
-  - 定期快照
-  - 跨区域备份
-- 🔄 **CI/CD流程**：
-  - 自动化测试流程
-  - 自动化部署流程
-
-## 使用说明
-
-### 安装
-
-1. 克隆仓库
 ```bash
-git clone https://github.com/Kylinlixd/AstraStoreXion.git
-cd astrastore-xion
+go test ./...
+make xion-service
+
+export XION_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export XION_LISTEN_ADDR=127.0.0.1:8081
+export XION_DATA_DIR="$(mktemp -d)"
+./bin/astrastore-xion
 ```
 
-2. 使用Docker Compose启动服务
+在另一个终端运行：
+
 ```bash
-docker-compose -f deploy/docker-compose.yaml up -d
+curl --fail http://127.0.0.1:8081/readyz
+
+XION_BASE_URL=http://127.0.0.1:8081 \
+XION_SERVICE_TOKEN="$XION_SERVICE_TOKEN" \
+./scripts/smoke-test.sh test/fixtures/generated/upload-smoke.txt
 ```
 
-### 开发环境搭建
+## Python SDK
 
-1. 安装依赖
 ```bash
-# 安装Go依赖
-go mod tidy
+python -m pip install ./client/python
 ```
 
-2. 启动开发环境
+```python
+import os
+from astrastore_xion import XionClient, XionConfig
+
+config = XionConfig(
+    api_gateway="http://127.0.0.1:8081",
+    service_token=os.environ["XION_SERVICE_TOKEN"],
+)
+
+with XionClient(config) as client:
+    with open("example.txt", "rb") as source:
+        stored = client.upload_file(source, "example.txt")
+    with open("downloaded.txt", "wb") as target:
+        client.download_file(stored.file_id, target)
+    client.delete_file(stored.file_id)
+```
+
+完整说明见[客户端使用教程](docs/客户端使用文档.md)。
+
+## 生产部署
+
+生产服务只应监听 `127.0.0.1`，由 Django 代理业务文件操作。不要在 Nginx 暴露 8081，也不要把服务密钥交给浏览器。
+
+- systemd 单元：`deploy/systemd/astrastore-xion.service`
+- 非敏感环境模板：`deploy/systemd/astrastore-xion.env.example`
+- 运维、备份、启用和回滚：[单节点运维手册](docs/operations/README.md)
+- 融合架构：[设计说明](docs/superpowers/specs/2026-08-09-blog-storage-integration-design.md)
+
+## 测试资料
+
+`make fixtures` 会生成可重复的 PNG、PDF、DOCX、TXT 与 checksum manifest。首次生成前安装专用依赖；它们不属于服务运行时依赖。PDF 和 Word 文件已按渲染结果做视觉验证，用于本地与生产上传/下载验收。
+
 ```bash
-# 启动开发环境
-./scripts/dev-start.sh
+python -m pip install -r scripts/requirements-artifacts.txt
+make fixtures
+ls -lh test/fixtures/generated
 ```
 
-3. 运行测试
+## 验证
+
 ```bash
-# 运行单元测试
-go test ./test/unit/...
-
-# 运行集成测试
-go test ./test/integration/...
+go test ./... -count=1
+go test ./... -race -count=1
+go vet ./...
+python -m pytest client/python/tests -q
 ```
 
-## 客户端使用
+## 限制
 
-请参阅 [客户端使用文档](./docs/客户端使用文档.md)。
+当前为单节点服务，不提供副本、自动故障转移或跨区域容灾；必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
 
-## 贡献指南
+## License
 
-1. Fork项目仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add some amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 创建Pull Request
-
-## 许可证
-
-MIT 
+MIT

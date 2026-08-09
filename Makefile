@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway metaservice storagenode client docker-build dev-start dev-stop help
+.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway xion-service metaservice storagenode client python-test fixtures smoke docker-build dev-start dev-stop help
 
 # 默认目标
 all: build
@@ -18,6 +18,24 @@ apigateway:
 	@echo "构建API网关..."
 	@mkdir -p bin
 	@go build -o bin/apigateway ./core/apigateway
+
+# 构建博客融合使用的单节点服务
+xion-service:
+	@mkdir -p bin
+	@go build -trimpath -o bin/astrastore-xion ./core/apigateway
+
+# 运行生产 Python SDK 测试
+python-test:
+	@python3 -m pytest client/python/tests -q
+
+# 生成 PNG、PDF、DOCX、TXT 与 checksum manifest
+fixtures:
+	@python3 scripts/generate_test_artifacts.py
+
+# 对指定测试文件运行完整生命周期；需传 FIXTURE 和环境变量
+smoke:
+	@test -n "$(FIXTURE)" || (echo "FIXTURE is required" >&2; exit 2)
+	@./scripts/smoke-test.sh "$(FIXTURE)"
 
 # 构建元数据服务
 metaservice:
@@ -102,9 +120,13 @@ help:
 	@echo "可用命令:"
 	@echo "  make                 - 构建所有组件"
 	@echo "  make apigateway      - 只构建API网关"
+	@echo "  make xion-service    - 构建博客融合单节点服务"
 	@echo "  make metaservice     - 只构建元数据服务"
 	@echo "  make storagenode     - 只构建存储节点"
 	@echo "  make client          - 只构建客户端工具"
+	@echo "  make python-test     - 运行 Python SDK 测试"
+	@echo "  make fixtures        - 生成上传验收资料"
+	@echo "  make smoke FIXTURE=... - 运行字节级生命周期测试"
 	@echo "  make test            - 运行所有测试"
 	@echo "  make test-unit       - 只运行单元测试"
 	@echo "  make test-integration - 只运行集成测试"
@@ -115,4 +137,4 @@ help:
 	@echo "  make docker-build    - 构建Docker镜像"
 	@echo "  make dev-start       - 启动开发环境"
 	@echo "  make dev-stop        - 停止开发环境"
-	@echo "  make help            - 显示帮助信息" 
+	@echo "  make help            - 显示帮助信息"
