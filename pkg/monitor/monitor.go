@@ -86,6 +86,9 @@ type Monitor interface {
 	// 更新仪表盘
 	SetGauge(name string, value float64, labels map[string]string) error
 
+	// 按增量更新仪表盘
+	AddGauge(name string, delta float64, labels map[string]string) error
+
 	// 观察直方图或摘要
 	Observe(name string, value float64, labels map[string]string) error
 

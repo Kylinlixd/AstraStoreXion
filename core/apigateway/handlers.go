@@ -315,3 +315,21 @@ func (r *uploadLimitReader) Read(buffer []byte) (int, error) {
 	}
 	return read, err
 }
+
+func ensureFileService() *files.Service {
+	if fileService == nil {
+		initFileService("data/files")
+	}
+	return fileService
+}
+
+func parsePositiveInt(value string, fallback int) int {
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}

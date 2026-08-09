@@ -2,17 +2,31 @@ package metadata
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
 
+type FileStatus string
+
+const (
+	FileStatusReady   FileStatus = "ready"
+	FileStatusDeleted FileStatus = "deleted"
+)
+
 // FileMetadata 文件元数据
 type FileMetadata struct {
-	FileID    string
-	ShardKey  uint32
-	Chunks    []ChunkInfo
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	FileID      string
+	Name        string
+	ContentType string
+	Size        int64
+	Checksum    string
+	OwnerID     string
+	Status      FileStatus
+	ShardKey    uint32
+	Chunks      []ChunkInfo
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ChunkInfo 块信息
@@ -23,8 +37,23 @@ type ChunkInfo struct {
 	Size    int64
 }
 
+type CreateFileMetadataInput struct {
+	FileID      string
+	Name        string
+	ContentType string
+	Size        int64
+	Checksum    string
+	OwnerID     string
+	Status      FileStatus
+	ShardKey    uint32
+	Chunks      []ChunkInfo
+}
+
 // MetadataService 元数据服务接口
 type MetadataService interface {
+	// 创建完整文件元数据
+	CreateFileMetadata(input CreateFileMetadataInput) error
+
 	// 创建文件元数据
 	CreateMetadata(fileID string, shardKey uint32, chunks []ChunkInfo) error
 
@@ -59,20 +88,39 @@ func NewInMemoryMetadataService() MetadataService {
 
 // CreateMetadata 创建文件元数据
 func (s *InMemoryMetadataService) CreateMetadata(fileID string, shardKey uint32, chunks []ChunkInfo) error {
+	return s.CreateFileMetadata(CreateFileMetadataInput{
+		FileID:   fileID,
+		ShardKey: shardKey,
+		Status:   FileStatusReady,
+		Chunks:   chunks,
+	})
+}
+
+// CreateFileMetadata 创建完整文件元数据
+func (s *InMemoryMetadataService) CreateFileMetadata(input CreateFileMetadataInput) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if _, exists := s.data[fileID]; exists {
-		return fmt.Errorf("文件ID %s 已存在", fileID)
+	if _, exists := s.data[input.FileID]; exists {
+		return fmt.Errorf("文件ID %s 已存在", input.FileID)
+	}
+	if input.Status == "" {
+		input.Status = FileStatusReady
 	}
 
 	now := time.Now()
-	s.data[fileID] = &FileMetadata{
-		FileID:    fileID,
-		ShardKey:  shardKey,
-		Chunks:    chunks,
-		CreatedAt: now,
-		UpdatedAt: now,
+	s.data[input.FileID] = &FileMetadata{
+		FileID:      input.FileID,
+		Name:        input.Name,
+		ContentType: input.ContentType,
+		Size:        input.Size,
+		Checksum:    input.Checksum,
+		OwnerID:     input.OwnerID,
+		Status:      input.Status,
+		ShardKey:    input.ShardKey,
+		Chunks:      cloneChunks(input.Chunks),
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	return nil
@@ -88,7 +136,7 @@ func (s *InMemoryMetadataService) GetMetadata(fileID string) (*FileMetadata, err
 		return nil, fmt.Errorf("文件ID %s 不存在", fileID)
 	}
 
-	return meta, nil
+	return cloneMetadata(meta), nil
 }
 
 // UpdateMetadata 更新文件元数据
@@ -101,7 +149,7 @@ func (s *InMemoryMetadataService) UpdateMetadata(fileID string, chunks []ChunkIn
 		return fmt.Errorf("文件ID %s 不存在", fileID)
 	}
 
-	meta.Chunks = chunks
+	meta.Chunks = cloneChunks(chunks)
 	meta.UpdatedAt = time.Now()
 
 	return nil
@@ -133,17 +181,17 @@ func (s *InMemoryMetadataService) ListMetadata(limit, offset int) ([]*FileMetada
 		limit = 10 // 默认限制
 	}
 
-	var result []*FileMetadata
-	var idx int
-
-	for _, meta := range s.data {
-		if idx >= offset && len(result) < limit {
-			result = append(result, meta)
-		}
-		idx++
+	items := s.sortedMetadata()
+	if offset >= len(items) {
+		return []*FileMetadata{}, nil
 	}
 
-	return result, nil
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+
+	return items[offset:end], nil
 }
 
 // ListMetadataByNodeID 按节点ID列出文件元数据
@@ -159,10 +207,9 @@ func (s *InMemoryMetadataService) ListMetadataByNodeID(nodeID string, limit, off
 		limit = 10 // 默认限制
 	}
 
-	var result []*FileMetadata
-	var idx int
+	var filtered []*FileMetadata
 
-	for _, meta := range s.data {
+	for _, meta := range s.sortedMetadata() {
 		// 检查是否有任何块属于该节点
 		hasNode := false
 		for _, chunk := range meta.Chunks {
@@ -173,12 +220,48 @@ func (s *InMemoryMetadataService) ListMetadataByNodeID(nodeID string, limit, off
 		}
 
 		if hasNode {
-			if idx >= offset && len(result) < limit {
-				result = append(result, meta)
-			}
-			idx++
+			filtered = append(filtered, meta)
 		}
 	}
 
-	return result, nil
+	if offset >= len(filtered) {
+		return []*FileMetadata{}, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+
+	return filtered[offset:end], nil
+}
+
+func (s *InMemoryMetadataService) sortedMetadata() []*FileMetadata {
+	items := make([]*FileMetadata, 0, len(s.data))
+	for _, meta := range s.data {
+		items = append(items, cloneMetadata(meta))
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].FileID < items[j].FileID
+	})
+
+	return items
+}
+
+func cloneMetadata(meta *FileMetadata) *FileMetadata {
+	if meta == nil {
+		return nil
+	}
+	clone := *meta
+	clone.Chunks = cloneChunks(meta.Chunks)
+	return &clone
+}
+
+func cloneChunks(chunks []ChunkInfo) []ChunkInfo {
+	if chunks == nil {
+		return nil
+	}
+	clone := make([]ChunkInfo, len(chunks))
+	copy(clone, chunks)
+	return clone
 }

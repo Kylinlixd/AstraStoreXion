@@ -172,6 +172,33 @@ func (m *PrometheusMonitor) SetGauge(name string, value float64, labels map[stri
 	return fmt.Errorf("指标 %s 不是仪表盘类型", name)
 }
 
+// AddGauge 按增量更新仪表盘值
+func (m *PrometheusMonitor) AddGauge(name string, delta float64, labels map[string]string) error {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	metric, exists := m.metrics[name]
+	if !exists {
+		return fmt.Errorf("指标 %s 不存在", name)
+	}
+
+	if gauge, ok := metric.(prometheus.Gauge); ok {
+		gauge.Add(delta)
+		return nil
+	}
+
+	if gaugeVec, ok := metric.(*prometheus.GaugeVec); ok {
+		gauge, err := gaugeVec.GetMetricWith(labels)
+		if err != nil {
+			return fmt.Errorf("获取指标失败: %v", err)
+		}
+		gauge.Add(delta)
+		return nil
+	}
+
+	return fmt.Errorf("指标 %s 不是仪表盘类型", name)
+}
+
 // Observe 观察值
 func (m *PrometheusMonitor) Observe(name string, value float64, labels map[string]string) error {
 	m.mutex.RLock()

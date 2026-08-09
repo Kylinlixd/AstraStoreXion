@@ -97,8 +97,9 @@ type AuthConfig struct {
 
 // JWTAuthenticator JWT认证器实现
 type JWTAuthenticator struct {
-	config AuthConfig
-	userDB map[string]*User // 简化实现，实际应使用数据库
+	config     AuthConfig
+	userDB     map[string]*User  // 简化实现，实际应使用数据库
+	passwordDB map[string]string // 简化实现，实际应存储密码哈希
 }
 
 // NewJWTAuthenticator 创建JWT认证器
@@ -112,8 +113,9 @@ func NewJWTAuthenticator(config AuthConfig) *JWTAuthenticator {
 	}
 
 	return &JWTAuthenticator{
-		config: config,
-		userDB: make(map[string]*User),
+		config:     config,
+		userDB:     make(map[string]*User),
+		passwordDB: make(map[string]string),
 	}
 }
 
@@ -126,6 +128,7 @@ func (a *JWTAuthenticator) RegisterUser(user *User, password string) error {
 
 	// 实际应对密码进行哈希处理
 	a.userDB[user.Username] = user
+	a.passwordDB[user.Username] = password
 	return nil
 }
 
@@ -137,8 +140,9 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, username, password 
 		return nil, ErrUserNotFound
 	}
 
-	// 实际应验证密码哈希
-	// 这里简化实现，假设验证通过
+	if a.passwordDB[username] != password {
+		return nil, ErrInvalidCredentials
+	}
 
 	return user, nil
 }
