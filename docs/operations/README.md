@@ -68,7 +68,7 @@ XION_STORAGE_ENABLED=true
 XION_BASE_URL=http://127.0.0.1:8081
 XION_SERVICE_TOKEN=<same server-side secret>
 XION_CONNECT_TIMEOUT=3
-XION_READ_TIMEOUT=30
+XION_READ_TIMEOUT=300
 XION_MAX_RETRIES=2
 ```
 
@@ -108,9 +108,10 @@ sudo systemctl start astrastore-xion
 
 1. 将博客 `XION_STORAGE_ENABLED=false`，重启博客，停止新写入 Xion。
 2. 将前端 `current` 指回上一 release，并 reload Nginx。
-3. 恢复后端代码和 `.env` 备份；只有迁移不兼容时才回滚数据库。
-4. 保留 `/var/lib/astrastore-xion`，不要删除已有对象；已有 `storage_backend=xion` 的记录仍需该服务读取。
-5. 修复完成后先启服务、再启博客开关。
+3. 若数据库中还没有 `storage_backend=xion` 的记录，可恢复适配器引入前的后端代码；一旦已有 Xion 记录，必须保留包含双存储适配器的兼容后端版本，不能直接恢复纯本地旧代码。
+4. 保留 `/var/lib/astrastore-xion`，不要删除已有对象；已有 `storage_backend=xion` 的记录始终需要兼容适配器与 Xion 服务读取。
+5. 如确需回到纯本地旧后端，必须先把全部 Xion 对象迁回 `media/`、校验 SHA-256 并在事务中更新记录，完成数据库与对象备份后才能切换。
+6. 修复完成后先启服务、验证 `/readyz`，再启博客写入开关。
 
 ## 日常检查
 

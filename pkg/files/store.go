@@ -297,14 +297,16 @@ func (s *DiskStore) Ready(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read metadata directory: %w", err)
 	}
+	manifestIDs := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+			return fmt.Errorf("%w: unexpected metadata artifact %s", ErrCorruptMetadata, entry.Name())
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		if err := validateID(id); err != nil {
 			return fmt.Errorf("%w: unexpected manifest %s", ErrCorruptMetadata, entry.Name())
 		}
+		manifestIDs[id] = struct{}{}
 		if _, err := s.getUnlocked(id); err != nil {
 			return err
 		}
@@ -313,6 +315,25 @@ func (s *DiskStore) Ready(ctx context.Context) error {
 		} else if err != nil {
 			return fmt.Errorf("stat object: %w", err)
 		}
+	}
+	objects, err := os.ReadDir(s.objectsDir)
+	if err != nil {
+		return fmt.Errorf("read object directory: %w", err)
+	}
+	for _, entry := range objects {
+		if entry.IsDir() || validateID(entry.Name()) != nil {
+			return fmt.Errorf("%w: unexpected object artifact %s", ErrCorruptMetadata, entry.Name())
+		}
+		if _, ok := manifestIDs[entry.Name()]; !ok {
+			return fmt.Errorf("%w: object %s has no manifest", ErrCorruptMetadata, entry.Name())
+		}
+	}
+	partials, err := os.ReadDir(s.tmpDir)
+	if err != nil {
+		return fmt.Errorf("read temporary directory: %w", err)
+	}
+	if len(partials) > 0 {
+		return fmt.Errorf("%w: unexpected temporary artifact %s", ErrCorruptMetadata, partials[0].Name())
 	}
 	return nil
 }

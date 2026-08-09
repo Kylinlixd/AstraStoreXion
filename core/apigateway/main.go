@@ -44,8 +44,8 @@ func run(ctx context.Context) error {
 		Addr:              address,
 		Handler:           newRouter(gateway{service: files.NewService(store), token: token, maxUploadBytes: maxUploadBytes}),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       2 * time.Minute,
-		WriteTimeout:      2 * time.Minute,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
 

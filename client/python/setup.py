@@ -8,7 +8,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="astrastore-xion-client",
-    version="1.1.0",
+    version="1.1.1",
     author="星辰离子X团队",
     author_email="support@astrastore.com",
     description="星辰离子X分布式文件存储系统的Python客户端",

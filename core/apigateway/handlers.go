@@ -87,51 +87,104 @@ func (g gateway) authenticate(next http.Handler) http.Handler {
 
 func (g gateway) upload(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, g.maxUploadBytes+(1<<20))
-	if err := request.ParseMultipartForm(g.maxUploadBytes + (1 << 20)); err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) {
-			writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
-			return
-		}
-		writeError(writer, http.StatusBadRequest, "invalid_multipart", "request must contain a multipart file")
-		return
-	}
-	if request.MultipartForm != nil {
-		defer request.MultipartForm.RemoveAll()
-	}
-	body, header, err := request.FormFile("file")
+	multipartReader, err := request.MultipartReader()
 	if err != nil {
-		writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
-		return
-	}
-	defer body.Close()
-	if header.Size > g.maxUploadBytes {
-		writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+		writeError(writer, http.StatusBadRequest, "invalid_multipart", "request must contain a multipart file")
 		return
 	}
 
 	metadata := map[string]string{}
-	if encoded := request.FormValue("metadata"); encoded != "" {
-		if err := json.Unmarshal([]byte(encoded), &metadata); err != nil {
-			writeError(writer, http.StatusBadRequest, "invalid_metadata", "metadata must be a JSON object with string values")
+	var created files.File
+	fileSeen := false
+	cleanupCreated := func() {
+		if created.ID == "" {
+			return
+		}
+		if err := g.service.Delete(request.Context(), created.ID); err != nil {
+			log.Printf("clean up rejected upload %s: %v", created.ID, err)
+		}
+	}
+
+	for {
+		part, err := multipartReader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			cleanupCreated()
+			writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+			return
+		}
+		if err != nil {
+			cleanupCreated()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains invalid multipart data")
+			return
+		}
+		if fileSeen {
+			_ = part.Close()
+			cleanupCreated()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "multipart metadata must precede the file")
+			return
+		}
+
+		switch part.FormName() {
+		case "metadata":
+			encoded, err := readMultipartField(part, 64<<10)
+			_ = part.Close()
+			if err != nil || (encoded != "" && json.Unmarshal([]byte(encoded), &metadata) != nil) {
+				writeError(writer, http.StatusBadRequest, "invalid_metadata", "metadata must be a JSON object with string values")
+				return
+			}
+		case "file":
+			if part.FileName() == "" {
+				_ = part.Close()
+				writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
+				return
+			}
+			fileSeen = true
+			created, err = g.service.Upload(request.Context(), files.UploadInput{
+				Name:        part.FileName(),
+				ContentType: part.Header.Get("Content-Type"),
+				Metadata:    metadata,
+				Reader:      &uploadLimitReader{reader: part, remaining: g.maxUploadBytes},
+			})
+			closeErr := part.Close()
+			if errors.Is(err, errFileTooLarge) {
+				writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+				return
+			}
+			if err != nil {
+				handleServiceError(writer, err)
+				return
+			}
+			if closeErr != nil {
+				cleanupCreated()
+				writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains invalid multipart data")
+				return
+			}
+		default:
+			_ = part.Close()
+			writeError(writer, http.StatusBadRequest, "invalid_multipart", "request contains an unsupported multipart field")
 			return
 		}
 	}
-	created, err := g.service.Upload(request.Context(), files.UploadInput{
-		Name:        header.Filename,
-		ContentType: header.Header.Get("Content-Type"),
-		Metadata:    metadata,
-		Reader:      &uploadLimitReader{reader: body, remaining: g.maxUploadBytes},
-	})
-	if errors.Is(err, errFileTooLarge) {
-		writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
-		return
-	}
-	if err != nil {
-		handleServiceError(writer, err)
+	if !fileSeen {
+		writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
 		return
 	}
 	writeJSON(writer, http.StatusCreated, created)
+}
+
+func readMultipartField(reader io.Reader, limit int64) (string, error) {
+	value, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(value)) > limit {
+		return "", errors.New("multipart field is too large")
+	}
+	return string(value), nil
 }
 
 func (g gateway) download(writer http.ResponseWriter, request *http.Request) {
@@ -252,6 +305,10 @@ func (r *uploadLimitReader) Read(buffer []byte) (int, error) {
 		buffer = buffer[:maximumRead]
 	}
 	read, err := r.reader.Read(buffer)
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		err = errFileTooLarge
+	}
 	r.remaining -= int64(read)
 	if r.remaining < 0 {
 		return read, errFileTooLarge

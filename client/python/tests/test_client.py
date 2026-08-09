@@ -2,10 +2,13 @@ import io
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from astrastore_xion import (
     XionClient,
     XionConfig,
     XionHTTPError,
+    XionUnavailableError,
 )
 
 
@@ -97,6 +100,18 @@ class XionClientTests(unittest.TestCase):
         client.download_file(FILE_PAYLOAD["file_id"], output)
 
         self.assertEqual(b"abcd", output.getvalue())
+        downloaded.close.assert_called_once_with()
+
+    def test_download_wraps_interrupted_stream_and_closes_response(self):
+        session = Mock()
+        downloaded = response(200)
+        downloaded.iter_content.side_effect = requests.ConnectionError("stream reset")
+        session.request.return_value = downloaded
+        client = self.make_client(session)
+
+        with self.assertRaises(XionUnavailableError):
+            client.download_file(FILE_PAYLOAD["file_id"], io.BytesIO())
+
         downloaded.close.assert_called_once_with()
 
     def test_list_and_delete_support_real_gateway_contract(self):

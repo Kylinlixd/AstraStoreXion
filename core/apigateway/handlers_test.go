@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"testing"
+	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
 	"github.com/stretchr/testify/assert"
@@ -86,6 +89,57 @@ func TestUploadRejectsFilesAboveConfiguredLimit(t *testing.T) {
 	assert.Equal(t, "file_too_large", response.Error.Code)
 }
 
+func TestUploadStartsStreamingBeforeMultipartBodyFinishes(t *testing.T) {
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	service := &streamProbeService{entered: make(chan struct{})}
+	router := newRouter(gateway{service: service, token: "test-token", maxUploadBytes: 1024})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/files", reader)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	authorize(request, "test-token")
+	response := httptest.NewRecorder()
+	releaseBody := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		defer writer.Close()
+		if err := multipartWriter.WriteField("metadata", `{"owner":"blog"}`); err != nil {
+			writeDone <- err
+			return
+		}
+		part, err := multipartWriter.CreateFormFile("file", "stream.txt")
+		if err != nil {
+			writeDone <- err
+			return
+		}
+		<-releaseBody
+		if _, err := part.Write([]byte("streamed")); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- multipartWriter.Close()
+	}()
+	handleDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(response, request)
+		close(handleDone)
+	}()
+
+	streamedBeforeFinish := false
+	select {
+	case <-service.entered:
+		streamedBeforeFinish = true
+	case <-time.After(time.Second):
+	}
+	close(releaseBody)
+	require.NoError(t, <-writeDone)
+	<-handleDone
+
+	assert.True(t, streamedBeforeFinish, "upload handler buffered the whole multipart request")
+	assert.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+	assert.Equal(t, []byte("streamed"), service.received)
+	assert.Equal(t, map[string]string{"owner": "blog"}, service.metadata)
+}
+
 func TestHealthAndReadinessArePublic(t *testing.T) {
 	router := newTestRouter(t, "test-token", 1024)
 
@@ -150,3 +204,32 @@ func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
+
+type streamProbeService struct {
+	entered  chan struct{}
+	received []byte
+	metadata map[string]string
+}
+
+func (s *streamProbeService) Upload(_ context.Context, input files.UploadInput) (files.File, error) {
+	close(s.entered)
+	received, err := io.ReadAll(input.Reader)
+	s.received = received
+	s.metadata = input.Metadata
+	return files.File{ID: "b8c21d60-e970-4df5-890b-0d2dba93a654", Name: input.Name}, err
+}
+
+func (*streamProbeService) Download(context.Context, string) (files.File, io.ReadCloser, error) {
+	panic("unexpected Download call")
+}
+
+func (*streamProbeService) Status(context.Context, string) (files.File, error) {
+	panic("unexpected Status call")
+}
+
+func (*streamProbeService) List(context.Context, int, int) ([]files.File, error) {
+	panic("unexpected List call")
+}
+
+func (*streamProbeService) Delete(context.Context, string) error { return nil }
+func (*streamProbeService) Ready(context.Context) error          { return nil }

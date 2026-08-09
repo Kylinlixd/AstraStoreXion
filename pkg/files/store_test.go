@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,35 @@ func TestDiskStoreReadyChecksWritableDirectories(t *testing.T) {
 	store, err := NewDiskStore(t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, store.Ready(context.Background()))
+}
+
+func TestDiskStoreReadyRejectsIncompleteCrashArtifacts(t *testing.T) {
+	const orphanID = "b8c21d60-e970-4df5-890b-0d2dba93a654"
+
+	tests := map[string]func(string) error{
+		"object without manifest": func(root string) error {
+			return os.WriteFile(filepath.Join(root, "objects", orphanID), []byte("orphan"), 0o640)
+		},
+		"temporary manifest": func(root string) error {
+			return os.WriteFile(filepath.Join(root, "metadata", orphanID+".json.tmp"), []byte("{}"), 0o640)
+		},
+		"partial object": func(root string) error {
+			return os.WriteFile(filepath.Join(root, "tmp", orphanID+".part"), []byte("partial"), 0o640)
+		},
+	}
+
+	for name, arrange := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewDiskStore(root)
+			require.NoError(t, err)
+			require.NoError(t, arrange(root))
+
+			err = store.Ready(context.Background())
+
+			assert.ErrorIs(t, err, ErrCorruptMetadata)
+		})
+	}
 }
 
 func sha256String(value string) string {

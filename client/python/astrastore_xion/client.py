@@ -81,9 +81,12 @@ class XionClient:
             stream=True,
         )
         try:
-            for chunk in response.iter_content(chunk_size=self.config.chunk_size):
-                if chunk:
-                    output.write(chunk)
+            try:
+                for chunk in response.iter_content(chunk_size=self.config.chunk_size):
+                    if chunk:
+                        output.write(chunk)
+            except requests.RequestException as error:
+                raise XionUnavailableError(str(error)) from error
         finally:
             response.close()
 
