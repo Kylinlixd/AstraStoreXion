@@ -1,83 +1,50 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""Response models returned by AstraStoreXion."""
 
-from typing import Dict, List, Optional
-from dataclasses import dataclass
-
-
-@dataclass
-class UploadFileResponse:
-    """上传文件响应"""
-    file_id: str
-    success: bool
-    message: str
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'UploadFileResponse':
-        """从字典创建实例"""
-        return cls(
-            file_id=data.get('file_id', ''),
-            success=data.get('success', False),
-            message=data.get('message', '')
-        )
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 
-@dataclass
-class DeleteFileResponse:
-    """删除文件响应"""
-    success: bool
-    message: str
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'DeleteFileResponse':
-        """从字典创建实例"""
-        return cls(
-            success=data.get('success', False),
-            message=data.get('message', '')
-        )
-
-
-@dataclass
-class ChunkInfo:
-    """块信息"""
-    chunk_id: str
-    node_id: str
-    offset: int
-    size: int
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'ChunkInfo':
-        """从字典创建实例"""
-        return cls(
-            chunk_id=data.get('chunk_id', ''),
-            node_id=data.get('node_id', ''),
-            offset=data.get('offset', 0),
-            size=data.get('size', 0)
-        )
-
-
-@dataclass
-class FileStatusResponse:
-    """文件状态响应"""
+@dataclass(frozen=True)
+class FileResponse:
     file_id: str
     filename: str
+    content_type: str
     size: int
-    status: str  # "available", "pending", "corrupted"
-    metadata: Dict[str, str]
-    chunks: Optional[List[ChunkInfo]] = None
-    
+    checksum: str
+    status: str
+    created_at: str
+    metadata: Dict[str, str] = field(default_factory=dict)
+
     @classmethod
-    def from_dict(cls, data: Dict) -> 'FileStatusResponse':
-        """从字典创建实例"""
-        chunks = None
-        if 'chunks' in data and data['chunks']:
-            chunks = [ChunkInfo.from_dict(chunk) for chunk in data['chunks']]
-            
+    def from_dict(cls, data: Dict) -> "FileResponse":
         return cls(
-            file_id=data.get('file_id', ''),
-            filename=data.get('filename', ''),
-            size=data.get('size', 0),
-            status=data.get('status', 'corrupted'),
-            metadata=data.get('metadata', {}),
-            chunks=chunks
-        ) 
+            file_id=str(data.get("file_id", "")),
+            filename=str(data.get("filename", "")),
+            content_type=str(data.get("content_type", "application/octet-stream")),
+            size=int(data.get("size", 0)),
+            checksum=str(data.get("checksum", "")),
+            status=str(data.get("status", "available")),
+            created_at=str(data.get("created_at", "")),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+UploadFileResponse = FileResponse
+FileStatusResponse = FileResponse
+
+
+@dataclass(frozen=True)
+class FileListResponse:
+    count: int
+    results: List[FileResponse]
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "FileListResponse":
+        results = [FileResponse.from_dict(item) for item in data.get("results", [])]
+        return cls(count=int(data.get("count", len(results))), results=results)
+
+
+@dataclass(frozen=True)
+class DeleteFileResponse:
+    success: bool
+    message: str = ""

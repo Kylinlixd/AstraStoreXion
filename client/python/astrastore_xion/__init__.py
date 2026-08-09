@@ -1,24 +1,32 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""AstraStoreXion Python client."""
 
-"""
-星辰离子X Python客户端
-
-这是星辰离子X分布式文件存储系统的Python客户端实现。
-"""
-
-__version__ = '1.0.0'
-
-from .client import XionClient
+from .client import (
+    XionClient,
+    XionError,
+    XionHTTPError,
+    XionUnavailableError,
+)
 from .config import XionConfig, load_config_from_yaml
-from .models import UploadFileResponse, DeleteFileResponse, FileStatusResponse, ChunkInfo
+from .models import (
+    DeleteFileResponse,
+    FileListResponse,
+    FileResponse,
+    FileStatusResponse,
+    UploadFileResponse,
+)
+
+__version__ = "1.1.0"
 
 __all__ = [
-    'XionClient',
-    'XionConfig',
-    'load_config_from_yaml',
-    'UploadFileResponse',
-    'DeleteFileResponse',
-    'FileStatusResponse',
-    'ChunkInfo',
-] 
+    "DeleteFileResponse",
+    "FileListResponse",
+    "FileResponse",
+    "FileStatusResponse",
+    "UploadFileResponse",
+    "XionClient",
+    "XionConfig",
+    "XionError",
+    "XionHTTPError",
+    "XionUnavailableError",
+    "load_config_from_yaml",
+]
