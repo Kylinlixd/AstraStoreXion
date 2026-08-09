@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-10T00:00:00+08:00",
+  "files": [
+    {
+      "name": "storage-test-cover.png",
+      "mime_type": "image/png",
+      "size": 132520,
+      "sha256": "51adbe2bbca23629001234a658c39a07c55e223005dab0c1b651cec8c34fe3ce"
+    },
+    {
+      "name": "storage-client-guide.pdf",
+      "mime_type": "application/pdf",
+      "size": 174818,
+      "sha256": "0ca30c1390f15016dd30e9d6fe93a4e1827c5dccb7cf659ee345c8b90d163741"
+    },
+    {
+      "name": "storage-integration-checklist.docx",
+      "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "size": 40175,
+      "sha256": "5420e3f991520e23309fea637a3dead6817fdb07a78f12731d61357d56d18fa7"
+    },
+    {
+      "name": "upload-smoke.txt",
+      "mime_type": "text/plain",
+      "size": 198,
+      "sha256": "4e9d6bdd605a7b3a2fe82c025105bd9e6be4cb529087b7e1a645600066d8b3d3"
+    }
+  ]
+}

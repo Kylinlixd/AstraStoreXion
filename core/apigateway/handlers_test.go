@@ -92,10 +92,14 @@ func TestHealthAndReadinessArePublic(t *testing.T) {
 	health := httptest.NewRequest(http.MethodGet, "/health", nil)
 	healthResponse := doJSON[statusResponse](t, router, health, http.StatusOK)
 	assert.Equal(t, "ok", healthResponse.Status)
+	healthz := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	doJSON[statusResponse](t, router, healthz, http.StatusOK)
 
 	ready := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	readyResponse := doJSON[statusResponse](t, router, ready, http.StatusOK)
 	assert.Equal(t, "ready", readyResponse.Status)
+	readyz := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	doJSON[statusResponse](t, router, readyz, http.StatusOK)
 }
 
 func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handler {

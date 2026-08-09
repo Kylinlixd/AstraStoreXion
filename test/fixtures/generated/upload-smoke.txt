@@ -1,0 +1,5 @@
+AstraStoreXion blog storage integration smoke fixture
+version=1
+generated_at=2026-08-10T00:00:00+08:00
+purpose=verify upload download checksum delete and restart persistence
+expected_encoding=utf-8

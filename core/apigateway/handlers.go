@@ -55,7 +55,9 @@ type apiErrorResponse struct {
 func newRouter(g gateway) http.Handler {
 	router := mux.NewRouter()
 	router.HandleFunc("/health", g.health).Methods(http.MethodGet)
+	router.HandleFunc("/healthz", g.health).Methods(http.MethodGet)
 	router.HandleFunc("/ready", g.ready).Methods(http.MethodGet)
+	router.HandleFunc("/readyz", g.ready).Methods(http.MethodGet)
 
 	fileRouter := router.PathPrefix("/api/v1/files").Subrouter()
 	fileRouter.Use(g.authenticate)
