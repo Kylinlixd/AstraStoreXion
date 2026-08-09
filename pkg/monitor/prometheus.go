@@ -127,7 +127,7 @@ func (m *PrometheusMonitor) IncCounter(name string, value float64, labels map[st
 	}
 
 	// 根据是否有标签调用不同的方法
-	if counter, ok := metric.(*prometheus.Counter); ok {
+	if counter, ok := metric.(prometheus.Counter); ok {
 		counter.Add(value)
 		return nil
 	}
@@ -155,7 +155,7 @@ func (m *PrometheusMonitor) SetGauge(name string, value float64, labels map[stri
 	}
 
 	// 根据是否有标签调用不同的方法
-	if gauge, ok := metric.(*prometheus.Gauge); ok {
+	if gauge, ok := metric.(prometheus.Gauge); ok {
 		gauge.Set(value)
 		return nil
 	}
@@ -183,7 +183,7 @@ func (m *PrometheusMonitor) Observe(name string, value float64, labels map[strin
 	}
 
 	// 处理直方图
-	if histogram, ok := metric.(*prometheus.Histogram); ok {
+	if histogram, ok := metric.(prometheus.Histogram); ok {
 		histogram.Observe(value)
 		return nil
 	}
@@ -198,7 +198,7 @@ func (m *PrometheusMonitor) Observe(name string, value float64, labels map[strin
 	}
 
 	// 处理摘要
-	if summary, ok := metric.(*prometheus.Summary); ok {
+	if summary, ok := metric.(prometheus.Summary); ok {
 		summary.Observe(value)
 		return nil
 	}
