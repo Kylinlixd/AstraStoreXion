@@ -57,27 +57,27 @@ Expected: all three services are active, readiness returns 200, and object/manif
 ### Task 2: Seed the NAS standby data and service
 
 Files:
-- Create on NAS: /vol1/astrastore-xion-failover-test/astrastore-xion
-- Create on NAS: /vol1/astrastore-xion-failover-test/data/objects
-- Create on NAS: /vol1/astrastore-xion-failover-test/data/metadata
-- Create on NAS: /vol1/astrastore-xion-failover-test/xion.env
-- Create on NAS: /vol1/astrastore-xion-failover-test/xion-test.service
+- Create on NAS: /vol1/1000/astrastore-xion-failover-test/astrastore-xion
+- Create on NAS: /vol1/1000/astrastore-xion-failover-test/data/objects
+- Create on NAS: /vol1/1000/astrastore-xion-failover-test/data/metadata
+- Create on NAS: /vol1/1000/astrastore-xion-failover-test/xion.env
+- Create on NAS: /vol1/1000/astrastore-xion-failover-test/xion-test.service
 
 - [ ] Step 1: Create an isolated NAS data directory and upload the binary
 
 Run through the existing NAS SSH mapping (27822), using lixd and never embedding its password in a command:
 
 ~~~bash
-ssh -p 27822 lixd@192.3.221.53 'install -d -m 700 /vol1/astrastore-xion-failover-test/data/objects /vol1/astrastore-xion-failover-test/data/metadata'
-scp -P 27822 /tmp/astrastore-xion-nas lixd@192.3.221.53:/vol1/astrastore-xion-failover-test/astrastore-xion
-ssh -p 27822 lixd@192.3.221.53 'chmod 700 /vol1/astrastore-xion-failover-test/astrastore-xion'
+ssh -p 27822 lixd@192.3.221.53 'install -d -m 700 /vol1/1000/astrastore-xion-failover-test/data/objects /vol1/1000/astrastore-xion-failover-test/data/metadata'
+scp -P 27822 /tmp/astrastore-xion-nas lixd@192.3.221.53:/vol1/1000/astrastore-xion-failover-test/astrastore-xion
+ssh -p 27822 lixd@192.3.221.53 'chmod 700 /vol1/1000/astrastore-xion-failover-test/astrastore-xion'
 ~~~
 
 Expected: the binary and empty data directories exist on /vol1; no existing NAS application path is touched.
 
 - [ ] Step 2: Copy the primary environment without exposing the token
 
-Create /vol1/astrastore-xion-failover-test/xion.env with mode 600, transferring the primary token through stdin only:
+Create /vol1/1000/astrastore-xion-failover-test/xion.env with mode 600, transferring the primary token through stdin only:
 
 The resulting file contains the three fixed settings above plus the XION_SERVICE_TOKEN line copied from the protected primary environment.
 
@@ -86,8 +86,8 @@ The actual transfer command is:
 ~~~bash
 {
   sed -n 's/^XION_SERVICE_TOKEN=.*/&/p' /etc/astrastore-xion.env
-  printf '%s\n' 'XION_LISTEN_ADDR=127.0.0.1:18081' 'XION_DATA_DIR=/vol1/astrastore-xion-failover-test/data' 'XION_MAX_UPLOAD_BYTES=52428800'
-} | ssh -p 27822 lixd@127.0.0.1 'umask 077; install -d -m 700 /vol1/astrastore-xion-failover-test; cat > /vol1/astrastore-xion-failover-test/xion.env; chmod 600 /vol1/astrastore-xion-failover-test/xion.env'
+  printf '%s\n' 'XION_LISTEN_ADDR=127.0.0.1:18081' 'XION_DATA_DIR=/vol1/1000/astrastore-xion-failover-test/data' 'XION_MAX_UPLOAD_BYTES=52428800'
+} | ssh -p 27822 lixd@127.0.0.1 'umask 077; install -d -m 700 /vol1/1000/astrastore-xion-failover-test; cat > /vol1/1000/astrastore-xion-failover-test/xion.env; chmod 600 /vol1/1000/astrastore-xion-failover-test/xion.env'
 ~~~
 
 Expected: the file is readable only by the test service account and the token never appears in terminal output, Git, or this plan.
@@ -97,8 +97,8 @@ Expected: the file is readable only by the test service account and the token ne
 Run from the public server as root, targeting only the isolated NAS directory:
 
 ~~~bash
-rsync -a --delete -e 'ssh -p 27822' /var/lib/astrastore-xion/objects/ lixd@127.0.0.1:/vol1/astrastore-xion-failover-test/data/objects/
-rsync -a --delete -e 'ssh -p 27822' /var/lib/astrastore-xion/metadata/ lixd@127.0.0.1:/vol1/astrastore-xion-failover-test/data/metadata/
+rsync -a --delete -e 'ssh -p 27822' /var/lib/astrastore-xion/objects/ lixd@127.0.0.1:/vol1/1000/astrastore-xion-failover-test/data/objects/
+rsync -a --delete -e 'ssh -p 27822' /var/lib/astrastore-xion/metadata/ lixd@127.0.0.1:/vol1/1000/astrastore-xion-failover-test/data/metadata/
 ~~~
 
 Expected: every primary object and JSON manifest exists on NAS; counts match before the standby starts.
@@ -117,8 +117,8 @@ Wants=network-online.target
 Type=simple
 User=lixd
 Group=Users
-EnvironmentFile=/vol1/astrastore-xion-failover-test/xion.env
-ExecStart=/vol1/astrastore-xion-failover-test/astrastore-xion
+EnvironmentFile=/vol1/1000/astrastore-xion-failover-test/xion.env
+ExecStart=/usr/local/libexec/astrastore-xion-failover-test
 Restart=on-failure
 RestartSec=2s
 UMask=0077
@@ -126,7 +126,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/vol1/astrastore-xion-failover-test
+ReadWritePaths=/vol1/1000/astrastore-xion-failover-test
 
 [Install]
 WantedBy=multi-user.target
@@ -199,7 +199,7 @@ Expected: existing data remains readable and the temporary upload lifecycle succ
 
 Files:
 - Restore: /opt/blog_li/.env
-- Remove after verification: /vol1/astrastore-xion-failover-test
+- Remove after verification: /vol1/1000/astrastore-xion-failover-test
 
 - [ ] Step 1: Stop the disposable NAS service
 
@@ -233,7 +233,7 @@ Run:
 
 ~~~bash
 curl --fail --silent --show-error https://leexd.top/blog >/dev/null
-sudo rm -rf -- /vol1/astrastore-xion-failover-test
+sudo rm -rf -- /vol1/1000/astrastore-xion-failover-test
 ~~~
 
 Expected: public blog responds successfully; only the explicitly named disposable NAS directory is removed.

@@ -12,7 +12,8 @@
 - NAS 无公网 IP，通过 NAS 主动运行的 `frpc` 连接服务器 `frps`。
 - 现有 FRP 映射保留给 SSH：服务器 `27822` → NAS `22`。
 - 新增专用映射：服务器 `27823` → NAS `127.0.0.1:18081`。
-- NAS Xion 使用与主节点相同的服务 token，但服务只绑定 NAS 本机回环地址；公网只看到 FRP 端口，不暴露 NAS 管理端口。
+- NAS Xion 使用与主节点相同的服务 token，但服务只绑定 NAS 本机回环地址；公网只看到 FRP 端口，不暴露 NAS 管理端口。NAS 数据目录使用 `/vol1/1000/astrastore-xion-failover-test`。
+- 本 NAS 的 `/vol1` 数据卷禁止直接执行程序；Xion 可执行文件必须放在 NAS 根文件系统（测试路径为 `/usr/local/libexec/astrastore-xion-failover-test`），数据仍放在 `/vol1/1000/astrastore-xion-failover-test/data`。
 - 生产博客默认仍指向 `http://127.0.0.1:8081`，切换时临时改为 `http://127.0.0.1:27823`。
 
 ## 测试流程
