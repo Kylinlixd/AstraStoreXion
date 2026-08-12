@@ -51,6 +51,26 @@ curl --fail http://127.0.0.1:8081/readyz
 ss -ltnp | grep '127.0.0.1:8081'
 ```
 
+安装服务器命令行工具：
+
+```bash
+make xionctl
+sudo XIONCTL_BINARY="$PWD/bin/xionctl" ./deploy/xionctl-install.sh
+xionctl health
+xionctl list | jq '.results[] | {id: .file_id, name: .filename, size}'
+```
+
+日常文件操作：
+
+```bash
+xionctl info <file-id>
+xionctl upload /path/to/file.png
+xionctl download <file-id> /tmp/file.png
+xionctl delete <file-id> --yes
+```
+
+`xionctl` 通过 Xion HTTP API 工作，绝不直接删除对象目录；删除前必须确认文件 ID，命令也要求显式提供 `--yes`。服务令牌只从 `/etc/astrastore-xion.env` 读取，不会打印到终端。
+
 ## 博客启用顺序
 
 1. 备份 MySQL、`/opt/blog_li` 代码、`.env` 和当前前端 release 指向。

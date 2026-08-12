@@ -12,6 +12,7 @@ AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前�
 - 50 MB 默认限制和结构化错误响应。
 - Python SDK 1.1：流式下载、安全重试和结构化异常。
 - systemd 最小权限部署与字节级 smoke test。
+- `xionctl` 服务器命令：健康检查、列表、详情、上传、下载和安全删除。
 - 博客双存储：新文件走 Xion，历史 `/media/` 保持可用。
 
 仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
@@ -64,6 +65,20 @@ with XionClient(config) as client:
 ```
 
 完整说明见[客户端使用教程](docs/客户端使用文档.md)。
+
+服务器上直接操作 Xion：
+
+```bash
+make xionctl
+sudo XIONCTL_BINARY="$PWD/bin/xionctl" ./deploy/xionctl-install.sh
+xionctl health
+xionctl list
+xionctl info <file-id>
+xionctl download <file-id> /tmp/file.bin
+xionctl delete <file-id> --yes
+```
+
+`xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
 
 ## 生产部署
 

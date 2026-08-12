@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway xion-service metaservice storagenode client python-test fixtures smoke docker-build dev-start dev-stop help
+.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway xion-service xionctl metaservice storagenode client python-test fixtures smoke docker-build dev-start dev-stop help
 
 # 默认目标
 all: build
@@ -23,6 +23,11 @@ apigateway:
 xion-service:
 	@mkdir -p bin
 	@go build -trimpath -o bin/astrastore-xion ./core/apigateway
+
+# 构建服务器命令行工具
+xionctl:
+	@mkdir -p bin
+	@go build -trimpath -ldflags='-s -w' -o bin/xionctl ./cmd/xionctl
 
 # 运行生产 Python SDK 测试
 python-test:
@@ -121,6 +126,7 @@ help:
 	@echo "  make                 - 构建所有组件"
 	@echo "  make apigateway      - 只构建API网关"
 	@echo "  make xion-service    - 构建博客融合单节点服务"
+	@echo "  make xionctl         - 构建服务器文件操作命令"
 	@echo "  make metaservice     - 只构建元数据服务"
 	@echo "  make storagenode     - 只构建存储节点"
 	@echo "  make client          - 只构建客户端工具"
