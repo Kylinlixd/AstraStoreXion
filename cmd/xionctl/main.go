@@ -247,14 +247,14 @@ func humanBytes(value uint64) string {
 	if value < unit {
 		return fmt.Sprintf("%d B", value)
 	}
-	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	units := []string{"K", "M", "G", "T", "P"}
 	amount := float64(value)
 	index := -1
 	for amount >= unit && index < len(units)-1 {
 		amount /= unit
 		index++
 	}
-	return fmt.Sprintf("%.1f %s", amount, units[index])
+	return fmt.Sprintf("%.1f%s", amount, units[index])
 }
 
 func maxInt64(value int64) int64 {

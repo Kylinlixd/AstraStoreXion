@@ -121,6 +121,15 @@ func TestRunCapacityPrintsAuthenticatedStorageStats(t *testing.T) {
 	}
 }
 
+func TestHumanBytesUsesCompactLinuxStyleUnits(t *testing.T) {
+	if got := humanBytes(29 * 1024 * 1024 * 1024); got != "29.0G" {
+		t.Fatalf("humanBytes() = %q, want 29.0G", got)
+	}
+	if got := humanBytes(512 * 1024 * 1024); got != "512.0M" {
+		t.Fatalf("humanBytes() = %q, want 512.0M", got)
+	}
+}
+
 func TestRunUploadShowsFriendlyStoragePausedMessage(t *testing.T) {
 	fixture := filepath.Join(t.TempDir(), "hello.txt")
 	if err := os.WriteFile(fixture, []byte("hello"), 0o600); err != nil {
