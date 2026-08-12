@@ -86,7 +86,7 @@ xionctl logs --follow
 
 `xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
 
-生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
+生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。`xionctl capacity` 使用类似 Linux `df -h` 的表格显示总容量、已用、可用、使用率和上传状态。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
 
 ## 生产部署
 

@@ -94,7 +94,7 @@ func runWithJournalRunner(args []string, stdout, stderr io.Writer, journalRunner
 		if err != nil {
 			return err
 		}
-		return printJSON(stdout, payload)
+		return printCapacity(stdout, payload)
 	case "info", "status":
 		if len(commandArgs) != 1 || strings.TrimSpace(commandArgs[0]) == "" {
 			return errors.New("用法: xionctl info <file-id>")
@@ -209,6 +209,59 @@ func printJSON(writer io.Writer, payload []byte) error {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
+}
+
+type capacityStats struct {
+	TotalBytes     uint64  `json:"total_bytes"`
+	UsedBytes      uint64  `json:"used_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
+	ObjectCount    int     `json:"object_count"`
+	ObjectBytes    int64   `json:"object_bytes"`
+	PauseAtPercent int     `json:"pause_at_percent"`
+	WritesPaused   bool    `json:"writes_paused"`
+}
+
+func printCapacity(writer io.Writer, payload []byte) error {
+	var stats capacityStats
+	if err := json.Unmarshal(payload, &stats); err != nil {
+		return fmt.Errorf("parse capacity response: %w", err)
+	}
+	if stats.TotalBytes == 0 {
+		return errors.New("xion returned invalid capacity: total_bytes is zero")
+	}
+	status := "可继续上传"
+	if stats.WritesPaused {
+		status = "已暂停上传，释放空间后自动恢复"
+	}
+	_, err := fmt.Fprintf(writer,
+		"Xion 存储容量\n\nFilesystem             Size     Used    Avail  Use%%  Status\nXion data filesystem  %7s  %7s  %7s  %5.1f%%  %s\n\n保护阈值：%d%%\n文件对象：%d 个（%s）\n",
+		humanBytes(stats.TotalBytes), humanBytes(stats.UsedBytes), humanBytes(stats.AvailableBytes),
+		stats.UsedPercent, status, stats.PauseAtPercent, stats.ObjectCount, humanBytes(uint64(maxInt64(stats.ObjectBytes))),
+	)
+	return err
+}
+
+func humanBytes(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	amount := float64(value)
+	index := -1
+	for amount >= unit && index < len(units)-1 {
+		amount /= unit
+		index++
+	}
+	return fmt.Sprintf("%.1f %s", amount, units[index])
+}
+
+func maxInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func usage() string {

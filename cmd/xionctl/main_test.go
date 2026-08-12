@@ -110,11 +110,13 @@ func TestRunCapacityPrintsAuthenticatedStorageStats(t *testing.T) {
 	if err := run([]string{"--api", server.URL, "--token", testToken, "capacity"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["writes_paused"] != true || decoded["used_percent"] != float64(90) {
+	output := stdout.String()
+	if !strings.Contains(output, "Filesystem") ||
+		!strings.Contains(output, "900 B") ||
+		!strings.Contains(output, "1000 B") ||
+		!strings.Contains(output, "100 B") ||
+		!strings.Contains(output, "90.0%") ||
+		!strings.Contains(output, "已暂停上传，释放空间后自动恢复") {
 		t.Fatalf("capacity output = %s", stdout.String())
 	}
 }

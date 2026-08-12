@@ -10,7 +10,7 @@
 - 上传开始前检查使用率；达到或超过阈值返回 HTTP 507、错误码 `storage_paused`。
 - 删除不受暂停影响，释放空间后下一次上传自动恢复；不需要手动 resume，也不需要重启服务。
 - `/api/v1/files/capacity` 需要服务令牌，返回 filesystem 总量、已用、可用、百分比、对象数量/字节数、阈值和当前是否暂停。
-- `xionctl capacity` 只读展示该接口的 JSON；不直接读写 Xion 数据目录。
+- `xionctl capacity` 只读展示类似 Linux `df -h` 的人类可读表格；不直接读写 Xion 数据目录，也不向终端输出 JSON。
 
 ## 边界
 
