@@ -235,8 +235,9 @@ func printCapacity(writer io.Writer, payload []byte) error {
 		status = "已暂停上传，释放空间后自动恢复"
 	}
 	_, err := fmt.Fprintf(writer,
-		"Xion 存储容量\n\nFilesystem             Size     Used    Avail  Use%%  Status\nXion data filesystem  %7s  %7s  %7s  %5.1f%%  %s\n\n保护阈值：%d%%\n文件对象：%d 个（%s）\n",
-		humanBytes(stats.TotalBytes), humanBytes(stats.UsedBytes), humanBytes(stats.AvailableBytes),
+		"Xion 存储容量\n\n%-22s %7s %7s %7s %5s  %s\n%-22s %7s %7s %7s %4.1f%%  %s\n\n保护阈值：%d%%\n文件对象：%d 个（%s）\n",
+		"Filesystem", "Size", "Used", "Avail", "Use%", "Status",
+		"Xion data filesystem", humanBytes(stats.TotalBytes), humanBytes(stats.UsedBytes), humanBytes(stats.AvailableBytes),
 		stats.UsedPercent, status, stats.PauseAtPercent, stats.ObjectCount, humanBytes(uint64(maxInt64(stats.ObjectBytes))),
 	)
 	return err

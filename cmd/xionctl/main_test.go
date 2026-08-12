@@ -130,6 +130,45 @@ func TestHumanBytesUsesCompactLinuxStyleUnits(t *testing.T) {
 	}
 }
 
+func TestCapacityColumnsAlignLikeDf(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestJSON(w, http.StatusOK, map[string]any{
+			"total_bytes":      29 * 1024 * 1024 * 1024,
+			"used_bytes":       7 * 1024 * 1024 * 1024,
+			"available_bytes":  20 * 1024 * 1024 * 1024,
+			"used_percent":     27,
+			"pause_at_percent": 90,
+			"writes_paused":    false,
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--api", server.URL, "--token", testToken, "capacity"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(stdout.String(), "\n")
+	var header, values string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Filesystem") {
+			header = line
+		}
+		if strings.HasPrefix(line, "Xion data filesystem") {
+			values = line
+		}
+	}
+	if header == "" || values == "" {
+		t.Fatalf("capacity table missing header or values: %q", stdout.String())
+	}
+	for _, pair := range [][2]string{{"Size", "29.0G"}, {"Used", "7.0G"}, {"Avail", "20.0G"}, {"Use%", "27.0%"}} {
+		headerIndex := strings.Index(header, pair[0])
+		valueIndex := strings.Index(values, pair[1])
+		if headerIndex+len(pair[0]) != valueIndex+len(pair[1]) {
+			t.Errorf("column %q misaligned: header-end=%d value-end=%d\n%s\n%s", pair[0], headerIndex+len(pair[0]), valueIndex+len(pair[1]), header, values)
+		}
+	}
+}
+
 func TestRunUploadShowsFriendlyStoragePausedMessage(t *testing.T) {
 	fixture := filepath.Join(t.TempDir(), "hello.txt")
 	if err := os.WriteFile(fixture, []byte("hello"), 0o600); err != nil {
