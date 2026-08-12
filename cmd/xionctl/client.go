@@ -53,6 +53,9 @@ func readXionError(response *http.Response) error {
 		} `json:"error"`
 	}
 	if json.Unmarshal(payload, &envelope) == nil && envelope.Error.Message != "" {
+		if envelope.Error.Code == "storage_paused" {
+			return fmt.Errorf("上传已暂停：%s", envelope.Error.Message)
+		}
 		return fmt.Errorf("xion: %s (%s, HTTP %d)", envelope.Error.Message, envelope.Error.Code, response.StatusCode)
 	}
 	return fmt.Errorf("xion returned HTTP %d", response.StatusCode)
@@ -82,6 +85,10 @@ func (c xionClient) health(ctx context.Context) (string, error) {
 func (c xionClient) list(ctx context.Context, limit, offset int) ([]byte, error) {
 	path := fmt.Sprintf("/api/v1/files?limit=%d&offset=%d", limit, offset)
 	return c.request(ctx, http.MethodGet, path, nil, "", http.StatusOK)
+}
+
+func (c xionClient) capacity(ctx context.Context) ([]byte, error) {
+	return c.request(ctx, http.MethodGet, "/api/v1/files/capacity", nil, "", http.StatusOK)
 }
 
 func (c xionClient) info(ctx context.Context, id string) ([]byte, error) {

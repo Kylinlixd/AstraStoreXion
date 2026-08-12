@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"fmt"
 	"io"
 )
 
@@ -35,4 +36,14 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 
 func (s *Service) Ready(ctx context.Context) error {
 	return s.store.Ready(ctx)
+}
+
+func (s *Service) Capacity(ctx context.Context) (Capacity, error) {
+	provider, ok := s.store.(interface {
+		Capacity(context.Context) (Capacity, error)
+	})
+	if !ok {
+		return Capacity{}, fmt.Errorf("storage capacity is unavailable")
+	}
+	return provider.Capacity(ctx)
 }

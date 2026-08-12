@@ -91,6 +91,53 @@ func TestRunListAndInfoPrintJSON(t *testing.T) {
 	}
 }
 
+func TestRunCapacityPrintsAuthenticatedStorageStats(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/files/capacity" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {
+			t.Fatalf("authorization = %q", got)
+		}
+		writeTestJSON(w, http.StatusOK, map[string]any{
+			"total_bytes": 1000, "used_bytes": 900, "available_bytes": 100,
+			"used_percent": 90, "pause_at_percent": 90, "writes_paused": true,
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--api", server.URL, "--token", testToken, "capacity"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["writes_paused"] != true || decoded["used_percent"] != float64(90) {
+		t.Fatalf("capacity output = %s", stdout.String())
+	}
+}
+
+func TestRunUploadShowsFriendlyStoragePausedMessage(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "hello.txt")
+	if err := os.WriteFile(fixture, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestJSON(w, http.StatusInsufficientStorage, map[string]any{"error": map[string]any{
+			"code": "storage_paused", "message": "存储空间已达到安全阈值，暂时停止上传；释放空间后会自动恢复。",
+		}})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"--api", server.URL, "--token", testToken, "upload", fixture}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "上传已暂停") || !strings.Contains(err.Error(), "自动恢复") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRunUploadUsesMultipartFile(t *testing.T) {
 	fixture := filepath.Join(t.TempDir(), "hello.txt")
 	if err := os.WriteFile(fixture, []byte("hello"), 0o600); err != nil {

@@ -9,7 +9,7 @@
 - `XION_STORAGE_PAUSE_AT_PERCENT` 配置自动暂停阈值，默认 90，设置为 `0` 表示关闭阈值保护。
 - 上传开始前检查使用率；达到或超过阈值返回 HTTP 507、错误码 `storage_paused`。
 - 删除不受暂停影响，释放空间后下一次上传自动恢复；不需要手动 resume，也不需要重启服务。
-- `/api/v1/capacity` 需要服务令牌，返回 filesystem 总量、已用、可用、百分比、对象数量/字节数、阈值和当前是否暂停。
+- `/api/v1/files/capacity` 需要服务令牌，返回 filesystem 总量、已用、可用、百分比、对象数量/字节数、阈值和当前是否暂停。
 - `xionctl capacity` 只读展示该接口的 JSON；不直接读写 Xion 数据目录。
 
 ## 边界
@@ -25,6 +25,6 @@
 ## 验证
 
 - 单元测试覆盖阈值触发、删除后恢复、容量字段计算和非法阈值配置。
-- HTTP 测试覆盖 `/api/v1/capacity`、507 错误和读取/删除不受暂停影响。
+- HTTP 测试覆盖 `/api/v1/files/capacity`、507 错误和读取/删除不受暂停影响。
 - CLI 测试覆盖 `xionctl capacity`。
 - 运行 `go test ./...`、`go vet ./...`，并在服务器验证容量输出和阈值配置。

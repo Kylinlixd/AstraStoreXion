@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 var validFileID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -32,26 +33,37 @@ type Store interface {
 }
 
 type DiskStore struct {
-	root        string
-	objectsDir  string
-	metadataDir string
-	tmpDir      string
-	mu          sync.RWMutex
+	root           string
+	objectsDir     string
+	metadataDir    string
+	tmpDir         string
+	pauseAtPercent int
+	statFS         func(string, *unix.Statfs_t) error
+	mu             sync.RWMutex
 }
 
 func NewDiskStore(root string) (*DiskStore, error) {
+	return NewDiskStoreWithPause(root, 0)
+}
+
+func NewDiskStoreWithPause(root string, pauseAtPercent int) (*DiskStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("%w: data directory is empty", ErrInvalidUpload)
+	}
+	if pauseAtPercent < 0 || pauseAtPercent > 100 {
+		return nil, fmt.Errorf("%w: pause threshold must be between 0 and 100", ErrInvalidUpload)
 	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve data directory: %w", err)
 	}
 	store := &DiskStore{
-		root:        absoluteRoot,
-		objectsDir:  filepath.Join(absoluteRoot, "objects"),
-		metadataDir: filepath.Join(absoluteRoot, "metadata"),
-		tmpDir:      filepath.Join(absoluteRoot, "tmp"),
+		root:           absoluteRoot,
+		objectsDir:     filepath.Join(absoluteRoot, "objects"),
+		metadataDir:    filepath.Join(absoluteRoot, "metadata"),
+		tmpDir:         filepath.Join(absoluteRoot, "tmp"),
+		pauseAtPercent: pauseAtPercent,
+		statFS:         unix.Statfs,
 	}
 	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -76,6 +88,13 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	paused, err := s.writesPausedUnlocked()
+	if err != nil {
+		return File{}, err
+	}
+	if paused {
+		return File{}, ErrStoragePaused
+	}
 
 	temporary, err := os.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
 	if err != nil {
@@ -140,6 +159,79 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 		return File{}, fmt.Errorf("sync metadata directory: %w", err)
 	}
 	return cloneFile(stored), nil
+}
+
+func (s *DiskStore) Capacity(ctx context.Context) (Capacity, error) {
+	if err := ctx.Err(); err != nil {
+		return Capacity{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.capacityUnlocked()
+}
+
+func (s *DiskStore) capacityUnlocked() (Capacity, error) {
+	var stat unix.Statfs_t
+	statFS := s.statFS
+	if statFS == nil {
+		statFS = unix.Statfs
+	}
+	if err := statFS(s.root, &stat); err != nil {
+		return Capacity{}, fmt.Errorf("stat storage filesystem: %w", err)
+	}
+	total := uint64(stat.Blocks) * uint64(stat.Bsize)
+	available := uint64(stat.Bavail) * uint64(stat.Bsize)
+	used := total - uint64(stat.Bfree)*uint64(stat.Bsize)
+	usedPercent := 0.0
+	if total > 0 {
+		usedPercent = float64(used) * 100 / float64(total)
+	}
+	objectCount, objectBytes, err := directoryUsage(s.objectsDir)
+	if err != nil {
+		return Capacity{}, err
+	}
+	metadataCount, _, err := directoryUsage(s.metadataDir)
+	if err != nil {
+		return Capacity{}, err
+	}
+	paused := s.pauseAtPercent > 0 && usedPercent >= float64(s.pauseAtPercent)
+	return Capacity{
+		TotalBytes: total, UsedBytes: used, AvailableBytes: available,
+		UsedPercent: usedPercent, ObjectCount: objectCount, ObjectBytes: objectBytes,
+		MetadataCount: metadataCount, PauseAtPercent: s.pauseAtPercent, WritesPaused: paused,
+	}, nil
+}
+
+func (s *DiskStore) writesPausedUnlocked() (bool, error) {
+	if s.pauseAtPercent == 0 {
+		return false, nil
+	}
+	capacity, err := s.capacityUnlocked()
+	if err != nil {
+		return false, err
+	}
+	return capacity.WritesPaused, nil
+}
+
+func directoryUsage(path string) (int, int64, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read storage directory: %w", err)
+	}
+	count := 0
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return 0, 0, fmt.Errorf("stat storage entry: %w", err)
+		}
+		count++
+		total += info.Size()
+	}
+	return count, total, nil
 }
 
 func (s *DiskStore) Open(ctx context.Context, id string) (File, io.ReadCloser, error) {

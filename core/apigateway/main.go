@@ -31,13 +31,19 @@ func run(ctx context.Context) error {
 		return errors.New("XION_SERVICE_TOKEN is required")
 	}
 	dataDirectory := envOrDefault("XION_DATA_DIR", "./data")
-	store, err := files.NewDiskStore(dataDirectory)
-	if err != nil {
-		return fmt.Errorf("initialize file store: %w", err)
-	}
+	var store *files.DiskStore
+	var err error
 	maxUploadBytes, err := envInt64("XION_MAX_UPLOAD_BYTES", defaultMaxUploadBytes)
 	if err != nil || maxUploadBytes < 1 {
 		return fmt.Errorf("XION_MAX_UPLOAD_BYTES must be a positive integer")
+	}
+	pauseAtPercent, err := envInt("XION_STORAGE_PAUSE_AT_PERCENT", 90)
+	if err != nil || pauseAtPercent < 0 || pauseAtPercent > 100 {
+		return fmt.Errorf("XION_STORAGE_PAUSE_AT_PERCENT must be between 0 and 100")
+	}
+	store, err = files.NewDiskStoreWithPause(dataDirectory, pauseAtPercent)
+	if err != nil {
+		return fmt.Errorf("initialize file store: %w", err)
 	}
 	address := envOrDefault("XION_LISTEN_ADDR", "127.0.0.1:8081")
 	server := &http.Server{
@@ -69,6 +75,14 @@ func run(ctx context.Context) error {
 		}
 		return fmt.Errorf("serve API: %w", err)
 	}
+}
+
+func envInt(name string, defaultValue int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	return strconv.Atoi(value)
 }
 
 func envOrDefault(name, defaultValue string) string {

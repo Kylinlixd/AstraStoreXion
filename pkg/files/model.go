@@ -11,6 +11,7 @@ var (
 	ErrInvalidUpload   = errors.New("invalid upload")
 	ErrNotFound        = errors.New("file not found")
 	ErrCorruptMetadata = errors.New("corrupt file metadata")
+	ErrStoragePaused   = errors.New("storage writes paused")
 )
 
 const StatusAvailable = "available"
@@ -31,6 +32,18 @@ type UploadInput struct {
 	ContentType string
 	Metadata    map[string]string
 	Reader      io.Reader
+}
+
+type Capacity struct {
+	TotalBytes     uint64  `json:"total_bytes"`
+	UsedBytes      uint64  `json:"used_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
+	ObjectCount    int     `json:"object_count"`
+	ObjectBytes    int64   `json:"object_bytes"`
+	MetadataCount  int     `json:"metadata_count"`
+	PauseAtPercent int     `json:"pause_at_percent"`
+	WritesPaused   bool    `json:"writes_paused"`
 }
 
 func cloneFile(file File) File {

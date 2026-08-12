@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestDiskStorePersistsAcrossRestart(t *testing.T) {
@@ -127,6 +128,55 @@ func TestDiskStoreReadyRejectsIncompleteCrashArtifacts(t *testing.T) {
 			assert.ErrorIs(t, err, ErrCorruptMetadata)
 		})
 	}
+}
+
+func TestDiskStorePausesWritesAtConfiguredCapacity(t *testing.T) {
+	store, err := NewDiskStoreWithPause(t.TempDir(), 90)
+	require.NoError(t, err)
+	store.statFS = func(_ string, stat *unix.Statfs_t) error {
+		stat.Blocks = 100
+		stat.Bfree = 5
+		stat.Bavail = 5
+		stat.Bsize = 1
+		return nil
+	}
+
+	capacity, err := store.Capacity(context.Background())
+	require.NoError(t, err)
+	assert.InDelta(t, 95.0, capacity.UsedPercent, 0.001)
+	assert.True(t, capacity.WritesPaused)
+	assert.ErrorIs(t, capacityWrite(store), ErrStoragePaused)
+}
+
+func TestDiskStoreDeleteAllowsAutomaticRecoveryAfterPause(t *testing.T) {
+	store, err := NewDiskStoreWithPause(t.TempDir(), 90)
+	require.NoError(t, err)
+	full := false
+	store.statFS = func(_ string, stat *unix.Statfs_t) error {
+		stat.Blocks = 100
+		stat.Bfree = 5
+		stat.Bavail = 5
+		if !full {
+			stat.Bfree = 50
+			stat.Bavail = 50
+		}
+		stat.Bsize = 1
+		return nil
+	}
+
+	saved, err := store.Put(context.Background(), UploadInput{Name: "recovery.txt", Reader: strings.NewReader("data")})
+	require.NoError(t, err)
+	full = true
+	assert.ErrorIs(t, capacityWrite(store), ErrStoragePaused)
+	require.NoError(t, store.Delete(context.Background(), saved.ID))
+	full = false
+	_, err = store.Put(context.Background(), UploadInput{Name: "recovered.txt", Reader: strings.NewReader("data")})
+	require.NoError(t, err)
+}
+
+func capacityWrite(store *DiskStore) error {
+	_, err := store.Put(context.Background(), UploadInput{Name: "blocked.txt", Reader: strings.NewReader("data")})
+	return err
 }
 
 func sha256String(value string) string {

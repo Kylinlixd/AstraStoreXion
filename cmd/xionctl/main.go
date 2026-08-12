@@ -86,6 +86,15 @@ func runWithJournalRunner(args []string, stdout, stderr io.Writer, journalRunner
 			return err
 		}
 		return printJSON(stdout, payload)
+	case "capacity":
+		if len(commandArgs) != 0 {
+			return errors.New("用法: xionctl capacity")
+		}
+		payload, err := client.capacity(ctx)
+		if err != nil {
+			return err
+		}
+		return printJSON(stdout, payload)
 	case "info", "status":
 		if len(commandArgs) != 1 || strings.TrimSpace(commandArgs[0]) == "" {
 			return errors.New("用法: xionctl info <file-id>")
@@ -203,5 +212,5 @@ func printJSON(writer io.Writer, payload []byte) error {
 }
 
 func usage() string {
-	return "使用方法:\n  xionctl health\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
+	return "使用方法:\n  xionctl health\n  xionctl capacity\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
 }

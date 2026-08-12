@@ -14,6 +14,7 @@ AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前�
 - systemd 最小权限部署与字节级 smoke test。
 - `xionctl` 服务器命令：健康检查、列表、详情、上传、下载和安全删除。
 - `xionctl logs` 查看 Xion systemd 节点运行日志。
+- 容量保护：按文件系统使用率自动暂停新上传，空间释放后自动恢复；`xionctl capacity` 可查看容量和暂停状态。
 - 博客双存储：新文件走 Xion，历史 `/media/` 保持可用。
 
 仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
@@ -73,6 +74,7 @@ with XionClient(config) as client:
 make xionctl
 sudo XIONCTL_BINARY="$PWD/bin/xionctl" ./deploy/xionctl-install.sh
 xionctl health
+xionctl capacity
 xionctl list
 xionctl info <file-id>
 xionctl download <file-id> /tmp/file.bin
@@ -83,6 +85,8 @@ xionctl logs --follow
 ```
 
 `xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
+
+生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
 
 ## 生产部署
 

@@ -26,6 +26,7 @@ type fileService interface {
 	List(context.Context, int, int) ([]files.File, error)
 	Delete(context.Context, string) error
 	Ready(context.Context) error
+	Capacity(context.Context) (files.Capacity, error)
 }
 
 type gateway struct {
@@ -44,8 +45,9 @@ type statusResponse struct {
 }
 
 type apiError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable,omitempty"`
 }
 
 type apiErrorResponse struct {
@@ -63,6 +65,7 @@ func newRouter(g gateway) http.Handler {
 	fileRouter.Use(g.authenticate)
 	fileRouter.HandleFunc("", g.upload).Methods(http.MethodPost)
 	fileRouter.HandleFunc("", g.list).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/capacity", g.capacity).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}/status", g.status).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.download).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.delete).Methods(http.MethodDelete)
@@ -233,6 +236,15 @@ func (g gateway) list(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Results: stored})
 }
 
+func (g gateway) capacity(writer http.ResponseWriter, request *http.Request) {
+	capacity, err := g.service.Capacity(request.Context())
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, capacity)
+}
+
 func (g gateway) delete(writer http.ResponseWriter, request *http.Request) {
 	if err := g.service.Delete(request.Context(), mux.Vars(request)["id"]); err != nil {
 		handleServiceError(writer, err)
@@ -257,6 +269,8 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, files.ErrInvalidID), errors.Is(err, files.ErrInvalidUpload):
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, files.ErrStoragePaused):
+		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "storage_paused", "存储空间已达到安全阈值，暂时停止上传；已有文件仍可读取，释放空间后会自动恢复。", true)
 	case errors.Is(err, files.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", "file does not exist")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -268,7 +282,11 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 }
 
 func writeError(writer http.ResponseWriter, status int, code, message string) {
-	writeJSON(writer, status, apiErrorResponse{Error: apiError{Code: code, Message: message}})
+	writeErrorWithRetry(writer, status, code, message, false)
+}
+
+func writeErrorWithRetry(writer http.ResponseWriter, status int, code, message string, retryable bool) {
+	writeJSON(writer, status, apiErrorResponse{Error: apiError{Code: code, Message: message, Retryable: retryable}})
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

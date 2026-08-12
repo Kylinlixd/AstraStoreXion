@@ -156,6 +156,32 @@ func TestHealthAndReadinessArePublic(t *testing.T) {
 	doJSON[statusResponse](t, router, readyz, http.StatusOK)
 }
 
+func TestCapacityRequiresTokenAndReturnsStorageStats(t *testing.T) {
+	store, err := files.NewDiskStoreWithPause(t.TempDir(), 90)
+	require.NoError(t, err)
+	router := newRouter(gateway{service: files.NewService(store), token: "test-token", maxUploadBytes: 1024})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/files/capacity", nil)
+	response := doJSON[apiErrorResponse](t, router, request, http.StatusUnauthorized)
+	assert.Equal(t, "unauthorized", response.Error.Code)
+
+	authorized := httptest.NewRequest(http.MethodGet, "/api/v1/files/capacity", nil)
+	authorize(authorized, "test-token")
+	capacity := doJSON[files.Capacity](t, router, authorized, http.StatusOK)
+	assert.Greater(t, capacity.TotalBytes, uint64(0))
+	assert.Equal(t, 0, capacity.ObjectCount)
+	assert.Equal(t, 90, capacity.PauseAtPercent)
+}
+
+func TestUploadMapsStoragePausedToInsufficientStorage(t *testing.T) {
+	service := &pausedService{}
+	router := newRouter(gateway{service: service, token: "test-token", maxUploadBytes: 1024})
+	request := multipartUpload(t, "/api/v1/files", "paused.txt", "text/plain", []byte("hello"))
+	authorize(request, "test-token")
+	response := doJSON[apiErrorResponse](t, router, request, http.StatusInsufficientStorage)
+	assert.Equal(t, "storage_paused", response.Error.Code)
+}
+
 func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handler {
 	t.Helper()
 	store, err := files.NewDiskStore(t.TempDir())
@@ -233,3 +259,24 @@ func (*streamProbeService) List(context.Context, int, int) ([]files.File, error)
 
 func (*streamProbeService) Delete(context.Context, string) error { return nil }
 func (*streamProbeService) Ready(context.Context) error          { return nil }
+func (*streamProbeService) Capacity(context.Context) (files.Capacity, error) {
+	return files.Capacity{}, nil
+}
+
+type pausedService struct{}
+
+func (*pausedService) Upload(context.Context, files.UploadInput) (files.File, error) {
+	return files.File{}, files.ErrStoragePaused
+}
+func (*pausedService) Download(context.Context, string) (files.File, io.ReadCloser, error) {
+	panic("unexpected Download call")
+}
+func (*pausedService) Status(context.Context, string) (files.File, error) {
+	panic("unexpected Status call")
+}
+func (*pausedService) List(context.Context, int, int) ([]files.File, error) {
+	panic("unexpected List call")
+}
+func (*pausedService) Delete(context.Context, string) error             { return nil }
+func (*pausedService) Ready(context.Context) error                      { return nil }
+func (*pausedService) Capacity(context.Context) (files.Capacity, error) { return files.Capacity{}, nil }
