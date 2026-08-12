@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 const defaultEnvFile = "/etc/astrastore-xion.env"
@@ -21,6 +22,10 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
+	return runWithJournalRunner(args, stdout, stderr, journalctlRunner)
+}
+
+func runWithJournalRunner(args []string, stdout, stderr io.Writer, journalRunner journalRunner) error {
 	commandIndex := findCommandIndex(args)
 	if commandIndex < 0 {
 		return errors.New(usage())
@@ -37,6 +42,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	command := args[commandIndex]
 	commandArgs := args[commandIndex+1:]
+	if command == "logs" {
+		flags, err := parseLogsFlags(commandArgs, stderr)
+		if err != nil {
+			return err
+		}
+		requestTimeout := *timeout
+		if requestTimeout <= 0 {
+			requestTimeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		defer cancel()
+		return runLogs(ctx, flags, stdout, stderr, journalRunner)
+	}
 
 	environment := map[string]string{}
 	for _, key := range []string{"XION_API_URL", "XION_LISTEN_ADDR", "XION_SERVICE_TOKEN", "XION_TIMEOUT"} {
@@ -153,8 +171,7 @@ type listFlags struct {
 }
 
 func parseListFlags(args []string, stderr io.Writer) (listFlags, error) {
-	flags := flag.NewFlagSet("list", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("list", stderr)
 	limit := flags.Int("limit", 100, "每页数量（1-1000）")
 	offset := flags.Int("offset", 0, "跳过数量")
 	if err := flags.Parse(args); err != nil {
@@ -164,6 +181,12 @@ func parseListFlags(args []string, stderr io.Writer) (listFlags, error) {
 		return listFlags{}, errors.New("用法: xionctl list [--limit 100] [--offset 0]")
 	}
 	return listFlags{limit: *limit, offset: *offset}, nil
+}
+
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	return flags
 }
 
 func printJSON(writer io.Writer, payload []byte) error {
@@ -180,5 +203,5 @@ func printJSON(writer io.Writer, payload []byte) error {
 }
 
 func usage() string {
-	return "使用方法:\n  xionctl health\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
+	return "使用方法:\n  xionctl health\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
 }

@@ -67,9 +67,14 @@ xionctl info <file-id>
 xionctl upload /path/to/file.png
 xionctl download <file-id> /tmp/file.png
 xionctl delete <file-id> --yes
+xionctl logs --lines 100
+xionctl logs --since 1h
+xionctl logs --follow
 ```
 
 `xionctl` 通过 Xion HTTP API 工作，绝不直接删除对象目录；删除前必须确认文件 ID，命令也要求显式提供 `--yes`。服务令牌只从 `/etc/astrastore-xion.env` 读取，不会打印到终端。
+
+`logs` 只读取固定单元 `astrastore-xion.service` 的 journal。默认最近 100 行；`--since 1h` 查看最近一小时，`--follow` 持续跟踪。它不经过 shell，不允许指定其他 systemd 服务，也不会改变 Xion 运行状态。
 
 ## 博客启用顺序
 

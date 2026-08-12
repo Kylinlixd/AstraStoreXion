@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -170,6 +172,49 @@ func TestRunDeleteRequiresExplicitConfirmation(t *testing.T) {
 	stdout.Reset()
 	if err := run([]string{"--api", server.URL, "--token", testToken, "delete", "file-1", "--yes"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunLogsUsesSafeJournalctlArguments(t *testing.T) {
+	var gotArgs []string
+	fakeRunner := func(_ context.Context, stdout, _ io.Writer, args []string) error {
+		gotArgs = append([]string(nil), args...)
+		_, _ = io.WriteString(stdout, "Aug 13 05:00:00 host astrastore-xion[1]: ready\n")
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runWithJournalRunner([]string{"logs", "--lines", "12", "--since", "1h", "--follow"}, &stdout, &stderr, fakeRunner); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(gotArgs, " "); got != "-u astrastore-xion.service --no-pager --output=cat -n 12 --since 1h -f" {
+		t.Fatalf("journalctl args = %q", got)
+	}
+	if !strings.Contains(stdout.String(), "ready") {
+		t.Fatalf("logs output = %q", stdout.String())
+	}
+}
+
+func TestRunLogsDefaultsToLastHundredLines(t *testing.T) {
+	var gotArgs []string
+	fakeRunner := func(_ context.Context, _, _ io.Writer, args []string) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runWithJournalRunner([]string{"logs"}, &stdout, &stderr, fakeRunner); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(gotArgs, " "); got != "-u astrastore-xion.service --no-pager --output=cat -n 100" {
+		t.Fatalf("journalctl args = %q", got)
+	}
+}
+
+func TestRunLogsPropagatesJournalError(t *testing.T) {
+	wanted := errors.New("journal permission denied")
+	fakeRunner := func(_ context.Context, _, _ io.Writer, _ []string) error { return wanted }
+	var stdout, stderr bytes.Buffer
+	if err := runWithJournalRunner([]string{"logs", "--lines", "5"}, &stdout, &stderr, fakeRunner); !errors.Is(err, wanted) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
