@@ -36,6 +36,94 @@ func TestLoadConfigUsesCLIOverEnvironmentAndEnvFile(t *testing.T) {
 	}
 }
 
+func TestRunConfigPrintsCurrentUploadLimitWithoutServiceToken(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), "astrastore-xion.env")
+	if err := os.WriteFile(envPath, []byte("XION_SERVICE_TOKEN=secret\nXION_MAX_UPLOAD_BYTES=52428800\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	called := false
+	serviceRunner := func(context.Context, ...string) error {
+		called = true
+		return nil
+	}
+	if err := runWithRunners([]string{"--env-file", envPath, "config"}, &stdout, &stderr, func(context.Context, io.Writer, io.Writer, []string) error { return nil }, serviceRunner); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("config query restarted the service")
+	}
+	if !strings.Contains(stdout.String(), "最大上传：50.0M") {
+		t.Fatalf("config output = %q", stdout.String())
+	}
+}
+
+func TestRunConfigUpdatesLimitPreservesSecretsAndRestartsService(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), "astrastore-xion.env")
+	original := "XION_SERVICE_TOKEN=secret\nXION_DATA_DIR=/var/lib/astrastore-xion\nXION_MAX_UPLOAD_BYTES=52428800\n"
+	if err := os.WriteFile(envPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	var gotArgs []string
+	serviceRunner := func(_ context.Context, args ...string) error {
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	if err := runWithRunners([]string{"--env-file", envPath, "config", "--max-upload-size", "100M"}, &stdout, &stderr, func(context.Context, io.Writer, io.Writer, []string) error { return nil }, serviceRunner); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "XION_SERVICE_TOKEN=secret") ||
+		!strings.Contains(string(updated), "XION_DATA_DIR=/var/lib/astrastore-xion") ||
+		!strings.Contains(string(updated), "XION_MAX_UPLOAD_BYTES=104857600") {
+		t.Fatalf("updated env = %q", updated)
+	}
+	if strings.Join(gotArgs, " ") != "restart astrastore-xion.service" {
+		t.Fatalf("systemctl args = %q", gotArgs)
+	}
+	if !strings.Contains(stdout.String(), "已更新最大上传：100.0M") {
+		t.Fatalf("config output = %q", stdout.String())
+	}
+}
+
+func TestRunConfigRejectsInvalidLimitWithoutChangingFile(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), "astrastore-xion.env")
+	original := "XION_SERVICE_TOKEN=secret\nXION_MAX_UPLOAD_BYTES=52428800\n"
+	if err := os.WriteFile(envPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	called := false
+	serviceRunner := func(context.Context, ...string) error {
+		called = true
+		return nil
+	}
+	err := runWithRunners([]string{"--env-file", envPath, "config", "--max-upload-size", "0M"}, &stdout, &stderr, func(context.Context, io.Writer, io.Writer, []string) error { return nil }, serviceRunner)
+	if err == nil || !strings.Contains(err.Error(), "最大上传大小") {
+		t.Fatalf("error = %v", err)
+	}
+	updated, readErr := os.ReadFile(envPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(updated) != original || called {
+		t.Fatalf("invalid update changed state: file=%q restarted=%v", updated, called)
+	}
+}
+
+func TestParseUploadSizeSupportsCommonUnits(t *testing.T) {
+	for input, expected := range map[string]int64{"50M": 50 << 20, "1G": 1 << 30, "512K": 512 << 10, "1048576": 1048576} {
+		got, err := parseUploadSize(input)
+		if err != nil || got != expected {
+			t.Errorf("parseUploadSize(%q) = %d, %v; want %d", input, got, err, expected)
+		}
+	}
+}
+
 func TestRunHealthChecksBothEndpoints(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+testToken {

@@ -22,10 +22,14 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	return runWithJournalRunner(args, stdout, stderr, journalctlRunner)
+	return runWithRunners(args, stdout, stderr, journalctlRunner, systemctlRunner)
 }
 
 func runWithJournalRunner(args []string, stdout, stderr io.Writer, journalRunner journalRunner) error {
+	return runWithRunners(args, stdout, stderr, journalRunner, systemctlRunner)
+}
+
+func runWithRunners(args []string, stdout, stderr io.Writer, journalRunner journalRunner, serviceRunner serviceRunner) error {
 	commandIndex := findCommandIndex(args)
 	if commandIndex < 0 {
 		return errors.New(usage())
@@ -54,6 +58,9 @@ func runWithJournalRunner(args []string, stdout, stderr io.Writer, journalRunner
 		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		defer cancel()
 		return runLogs(ctx, flags, stdout, stderr, journalRunner)
+	}
+	if command == "config" {
+		return runConfig(*envFile, commandArgs, stdout, stderr, serviceRunner)
 	}
 
 	environment := map[string]string{}
@@ -266,5 +273,5 @@ func maxInt64(value int64) int64 {
 }
 
 func usage() string {
-	return "使用方法:\n  xionctl health\n  xionctl capacity\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
+	return "使用方法:\n  xionctl health\n  xionctl capacity\n  xionctl config [--max-upload-size 100M]\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
 }

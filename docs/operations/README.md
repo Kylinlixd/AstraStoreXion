@@ -58,6 +58,8 @@ make xionctl
 sudo XIONCTL_BINARY="$PWD/bin/xionctl" ./deploy/xionctl-install.sh
 xionctl health
 xionctl capacity
+xionctl config
+xionctl config --max-upload-size 100M
 xionctl list | jq '.results[] | {id: .file_id, name: .filename, size}'
 ```
 
@@ -74,6 +76,15 @@ xionctl logs --follow
 ```
 
 `xionctl capacity` 使用类似 Linux `df -h` 的终端表格查看总量、已用、可用、使用率和上传状态。环境模板默认配置 `XION_STORAGE_PAUSE_AT_PERCENT=90`：达到阈值后 Xion 自动拒绝新上传并返回 HTTP 507，现有文件仍可读取/下载，删除文件释放空间后下一次上传自动恢复。该机制不迁移文件到其他节点；跨节点复制需要单独的复制协议。
+
+`xionctl config` 查看和修改 Xion 上传限制。修改前自动在同目录生成带时间戳的 `.backup-YYYYMMDD-HHMMSS` 配置备份，使用临时文件原子替换，然后重启 `astrastore-xion.service`：
+
+```bash
+xionctl config
+xionctl config --max-upload-size 100M
+```
+
+支持 `K`、`M`、`G`、`T` 后缀。该限制只作用于 Xion；博客 Django 仍有独立的文件大小校验，扩大线上上传上限时必须同步调整博客配置和前端限制。
 
 `xionctl` 通过 Xion HTTP API 工作，绝不直接删除对象目录；删除前必须确认文件 ID，命令也要求显式提供 `--yes`。服务令牌只从 `/etc/astrastore-xion.env` 读取，不会打印到终端。
 

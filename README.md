@@ -75,6 +75,8 @@ make xionctl
 sudo XIONCTL_BINARY="$PWD/bin/xionctl" ./deploy/xionctl-install.sh
 xionctl health
 xionctl capacity
+xionctl config
+xionctl config --max-upload-size 100M
 xionctl list
 xionctl info <file-id>
 xionctl download <file-id> /tmp/file.bin
@@ -87,6 +89,8 @@ xionctl logs --follow
 `xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
 
 生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。`xionctl capacity` 使用类似 Linux `df -h` 的表格显示总容量、已用、可用、使用率和上传状态。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
+
+`xionctl config` 查看最大上传限制；使用 `xionctl config --max-upload-size 100M` 可修改限制并自动重启 Xion。命令会备份环境文件，支持 `K`、`M`、`G` 等单位；博客自身的文件类型/大小校验仍需同步调整。
 
 ## 生产部署
 

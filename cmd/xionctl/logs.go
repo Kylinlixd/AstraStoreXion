@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 const xionSystemdUnit = "astrastore-xion.service"
@@ -18,6 +19,7 @@ type logsFlags struct {
 }
 
 type journalRunner func(context.Context, io.Writer, io.Writer, []string) error
+type serviceRunner func(context.Context, ...string) error
 
 func parseLogsFlags(args []string, stderr io.Writer) (logsFlags, error) {
 	flags := newFlagSet("logs", stderr)
@@ -53,6 +55,14 @@ func journalctlRunner(ctx context.Context, stdout, stderr io.Writer, args []stri
 			return ctx.Err()
 		}
 		return fmt.Errorf("journalctl: %w", err)
+	}
+	return nil
+}
+
+func systemctlRunner(ctx context.Context, args ...string) error {
+	command := exec.CommandContext(ctx, "systemctl", args...)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
