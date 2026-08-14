@@ -8,7 +8,7 @@
 - 使用独立的 `astrastore-xion` 系统用户，数据目录为 `/var/lib/astrastore-xion`。
 - 服务密钥只存在于 mode 0600 的 `/etc/astrastore-xion.env` 和博客受限环境文件。
 - 浏览器、Git、构建产物和日志中都不能出现服务密钥。
-- 单文件默认上限为 50 MB。
+- 单文件默认上限为 1 GiB。
 
 ## 安装
 

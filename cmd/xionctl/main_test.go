@@ -36,9 +36,15 @@ func TestLoadConfigUsesCLIOverEnvironmentAndEnvFile(t *testing.T) {
 	}
 }
 
+func TestDefaultMaxUploadBytesIsOneGiB(t *testing.T) {
+	if defaultMaxUploadBytes != 1<<30 {
+		t.Fatalf("defaultMaxUploadBytes = %d, want %d", defaultMaxUploadBytes, int64(1<<30))
+	}
+}
+
 func TestRunConfigPrintsCurrentUploadLimitWithoutServiceToken(t *testing.T) {
 	envPath := filepath.Join(t.TempDir(), "astrastore-xion.env")
-	if err := os.WriteFile(envPath, []byte("XION_SERVICE_TOKEN=secret\nXION_MAX_UPLOAD_BYTES=52428800\n"), 0o600); err != nil {
+	if err := os.WriteFile(envPath, []byte("XION_SERVICE_TOKEN=secret\nXION_MAX_UPLOAD_BYTES=1073741824\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -53,7 +59,7 @@ func TestRunConfigPrintsCurrentUploadLimitWithoutServiceToken(t *testing.T) {
 	if called {
 		t.Fatal("config query restarted the service")
 	}
-	if !strings.Contains(stdout.String(), "最大上传：50.0M") {
+	if !strings.Contains(stdout.String(), "最大上传：1.0G") {
 		t.Fatalf("config output = %q", stdout.String())
 	}
 }

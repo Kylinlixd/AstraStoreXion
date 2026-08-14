@@ -327,7 +327,7 @@ def generate_docx() -> None:
         ("Environment", "Production server"),
         ("Release date", "2026-08-10"),
         ("Storage", "New: Xion / Legacy: local media"),
-        ("File limit", "50 MB"),
+        ("File limit", "1 GB"),
     ]
     for row_index in range(2):
         for pair_index in range(2):
@@ -356,7 +356,7 @@ def generate_docx() -> None:
         [
             ("Start the Xion systemd service", "It listens only on 127.0.0.1; /healthz and /readyz succeed."),
             ("Apply Django migrations", "UploadFile has the new fields; historical rows default to local."),
-            ("Enable XION_STORAGE_ENABLED", "The blog reads the service URL, token, and 50 MB limit."),
+            ("Enable XION_STORAGE_ENABLED", "The blog reads the service URL, token, and 1 GB limit."),
             ("Switch the frontend release", "The current symlink changes atomically and the prior release remains available."),
         ],
     )
@@ -515,7 +515,7 @@ def generate_pdf() -> None:
         Table(
             [
                 [Paragraph("适用对象", h2), Paragraph("博客管理员、内容编辑者、部署运维人员", body)],
-                [Paragraph("上传限制", h2), Paragraph("单个文件不超过 50 MB", body)],
+                [Paragraph("上传限制", h2), Paragraph("单个文件不超过 1 GB", body)],
                 [Paragraph("存储模式", h2), Paragraph("新上传写入 AstraStoreXion，历史本地文件继续可用", body)],
             ],
             colWidths=[1.35 * inch, 5.65 * inch],
@@ -586,7 +586,7 @@ def generate_pdf() -> None:
         Table(
             [
                 [Paragraph("现象", h2), Paragraph("先检查", h2), Paragraph("处理", h2)],
-                [Paragraph("上传前即失败", body), Paragraph("是否超过 50 MB，扩展名是否正常", body), Paragraph("压缩或拆分文件，刷新后重试", body)],
+                [Paragraph("上传前即失败", body), Paragraph("是否超过 1 GB，扩展名是否正常", body), Paragraph("压缩或拆分文件，刷新后重试", body)],
                 [Paragraph("进度中断", body), Paragraph("网络连接、登录状态、服务健康", body), Paragraph("重新登录；运维检查 Xion 与博客服务", body)],
                 [Paragraph("可下载但不能预览", body), Paragraph("浏览器是否支持该格式", body), Paragraph("使用本地应用打开下载文件", body)],
                 [Paragraph("历史链接异常", body), Paragraph("/media/ Nginx alias 与文件权限", body), Paragraph("不要迁移或删除旧媒体，恢复 alias 配置", body)],

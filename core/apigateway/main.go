@@ -15,7 +15,7 @@ import (
 	"github.com/astrastore/astrastore-xion/pkg/files"
 )
 
-const defaultMaxUploadBytes int64 = 50 << 20
+const defaultMaxUploadBytes int64 = 1 << 30
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -50,8 +50,8 @@ func run(ctx context.Context) error {
 		Addr:              address,
 		Handler:           newRouter(gateway{service: files.NewService(store), token: token, maxUploadBytes: maxUploadBytes}),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       5 * time.Minute,
-		WriteTimeout:      5 * time.Minute,
+		ReadTimeout:       30 * time.Minute,
+		WriteTimeout:      30 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
 

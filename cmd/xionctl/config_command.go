@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const defaultMaxUploadBytes int64 = 50 << 20
+const defaultMaxUploadBytes int64 = 1 << 30
 
 func runConfig(envPath string, args []string, stdout, stderr io.Writer, serviceRunner serviceRunner) error {
 	flags := newFlagSet("config", stderr)
