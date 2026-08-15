@@ -92,6 +92,35 @@ xionctl logs --follow
 
 `xionctl config` 查看最大上传限制；使用 `xionctl config --max-upload-size 100M` 可修改限制并自动重启 Xion。命令会备份环境文件，支持 `K`、`M`、`G` 等单位；博客自身的文件类型/大小校验仍需同步调整。
 
+### 可恢复分片上传
+
+1 GiB 大文件可以使用上传会话，网络中断后从 `received_bytes` 继续，不需要重新上传：
+
+```bash
+API=http://127.0.0.1:8081
+TOKEN="$XION_SERVICE_TOKEN"
+
+# 1. 创建会话
+curl -sS -X POST "$API/api/v1/uploads" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"filename":"large.zip","content_type":"application/zip","size":104857600}'
+
+# 2. 按返回的 upload_id 和 received_bytes 顺序上传分片
+curl -sS -X PUT "$API/api/v1/uploads/<upload_id>" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Range: bytes 0-1048575/104857600' \
+  --data-binary @chunk-0001
+
+# 3. 查询断点
+curl -sS "$API/api/v1/uploads/<upload_id>" -H "Authorization: Bearer $TOKEN"
+
+# 4. 所有字节上传完成后提交
+curl -sS -X POST "$API/api/v1/uploads/<upload_id>/complete" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+分片必须连续提交，`Content-Length` 必须等于 `Content-Range` 的分片长度；服务会重新计算完整 SHA-256。旧的 `POST /api/v1/files` 单次上传接口仍然可用。中止未完成会话使用 `DELETE /api/v1/uploads/<upload_id>`。
+
 ## 生产部署
 
 生产服务只应监听 `127.0.0.1`，由 Django 代理业务文件操作。不要在 Nginx 暴露 8081，也不要把服务密钥交给浏览器。
@@ -122,7 +151,7 @@ python -m pytest client/python/tests -q
 
 ## 限制
 
-当前为单节点服务，不提供副本、自动故障转移或跨区域容灾；必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
+当前生产数据面仍为单节点；可恢复分片会话支持服务重启后继续，但尚未替代副本、自动故障转移或跨区域容灾。必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
 
 ## License
 

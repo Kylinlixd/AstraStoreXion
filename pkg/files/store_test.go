@@ -130,6 +130,57 @@ func TestDiskStoreReadyRejectsIncompleteCrashArtifacts(t *testing.T) {
 	}
 }
 
+func TestDiskStoreReadyAllowsPersistedResumableUpload(t *testing.T) {
+	root := t.TempDir()
+	first, err := NewDiskStore(root)
+	require.NoError(t, err)
+	session, err := first.StartUpload(context.Background(), MultipartStartInput{Name: "resume.bin", Size: 6})
+	require.NoError(t, err)
+	_, err = first.AppendUpload(context.Background(), session.ID, 0, 3, strings.NewReader("abc"), "")
+	require.NoError(t, err)
+
+	second, err := NewDiskStore(root)
+	require.NoError(t, err)
+	require.NoError(t, second.Ready(context.Background()))
+}
+
+func TestDiskStoreReadyRejectsIncompleteResumableArtifacts(t *testing.T) {
+	const uploadID = "b8c21d60-e970-4df5-890b-0d2dba93a654"
+	tests := map[string]func(string) error{
+		"missing manifest": func(root string) error {
+			directory := filepath.Join(root, "uploads", uploadID)
+			if err := os.MkdirAll(directory, 0o750); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(directory, "data.part"), []byte("partial"), 0o640)
+		},
+		"temporary manifest": func(root string) error {
+			directory := filepath.Join(root, "uploads", uploadID)
+			if err := os.MkdirAll(directory, 0o750); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(directory, "manifest.json.tmp"), []byte("{}"), 0o640)
+		},
+		"unknown artifact": func(root string) error {
+			directory := filepath.Join(root, "uploads", uploadID)
+			if err := os.MkdirAll(directory, 0o750); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(directory, "unexpected.bin"), []byte("partial"), 0o640)
+		},
+	}
+
+	for name, arrange := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewDiskStore(root)
+			require.NoError(t, err)
+			require.NoError(t, arrange(root))
+			assert.ErrorIs(t, store.Ready(context.Background()), ErrCorruptMetadata)
+		})
+	}
+}
+
 func TestDiskStorePausesWritesAtConfiguredCapacity(t *testing.T) {
 	store, err := NewDiskStoreWithPause(t.TempDir(), 90)
 	require.NoError(t, err)

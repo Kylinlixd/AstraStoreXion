@@ -148,6 +148,57 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 }
 ```
 
+### 可恢复分片上传
+
+可恢复上传使用 Xion 服务令牌（`Authorization: Bearer <service-token>`），适合 1 GiB 大文件。旧的 `POST /api/v1/files` 单次上传接口继续兼容。
+
+#### 创建上传会话
+
+```http
+POST /api/v1/uploads
+Content-Type: application/json
+Authorization: Bearer <service-token>
+
+{
+  "filename": "large.zip",
+  "content_type": "application/zip",
+  "size": 104857600,
+  "checksum": "可选的完整 SHA-256",
+  "metadata": {"owner": "blog"}
+}
+```
+
+响应包含 `upload_id`、`size`、`received_bytes` 和 `status=uploading`。
+
+#### 查询并追加分片
+
+```http
+GET /api/v1/uploads/{upload_id}
+Authorization: Bearer <service-token>
+
+PUT /api/v1/uploads/{upload_id}
+Authorization: Bearer <service-token>
+Content-Range: bytes 0-1048575/104857600
+X-Chunk-Checksum: 可选的当前分片 SHA-256
+Content-Length: 1048576
+
+<raw chunk bytes>
+```
+
+分片必须从当前 `received_bytes` 开始，服务端按顺序落盘；偏移不匹配返回 `409 upload_offset_conflict`。分片校验失败返回 `422 upload_checksum_mismatch`，存储达到暂停阈值返回 `507 storage_paused`。
+
+#### 完成或中止
+
+```http
+POST /api/v1/uploads/{upload_id}/complete
+Authorization: Bearer <service-token>
+
+DELETE /api/v1/uploads/{upload_id}
+Authorization: Bearer <service-token>
+```
+
+完成接口会重新计算完整 SHA-256，并返回标准文件对象；完成后文件可使用 `/api/v1/files/{file_id}` 下载、查询和删除。中止接口幂等删除未完成会话。
+
 ## 系统管理
 
 ### 健康检查

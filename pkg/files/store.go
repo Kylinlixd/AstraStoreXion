@@ -726,18 +726,33 @@ func (s *DiskStore) Ready(ctx context.Context) error {
 		if !entry.IsDir() || validateUploadID(entry.Name()) != nil {
 			return fmt.Errorf("%w: unexpected upload artifact %s", ErrCorruptMetadata, entry.Name())
 		}
-		session, err := s.getUploadUnlocked(entry.Name())
-		if err != nil {
-			return err
-		}
-		children, err := os.ReadDir(filepath.Join(s.uploadsDir, entry.Name()))
+		sessionDir := filepath.Join(s.uploadsDir, entry.Name())
+		children, err := os.ReadDir(sessionDir)
 		if err != nil {
 			return fmt.Errorf("read upload session: %w", err)
 		}
+		hasManifest := false
 		for _, child := range children {
-			valid := child.Name() == "manifest.json" || (child.Name() == "data.part" && session.Status == UploadStatusUploading)
-			if !valid {
+			if child.Name() == "manifest.json" {
+				hasManifest = true
+				continue
+			}
+			if child.Name() != "data.part" {
 				return fmt.Errorf("%w: unexpected upload artifact %s/%s", ErrCorruptMetadata, entry.Name(), child.Name())
+			}
+		}
+		if !hasManifest {
+			return fmt.Errorf("%w: upload %s has no manifest", ErrCorruptMetadata, entry.Name())
+		}
+		session, err := s.getUploadUnlocked(entry.Name())
+		if err != nil {
+			return fmt.Errorf("%w: upload %s: %v", ErrCorruptMetadata, entry.Name(), err)
+		}
+		if session.Status == UploadStatusCompleted {
+			for _, child := range children {
+				if child.Name() == "data.part" {
+					return fmt.Errorf("%w: completed upload %s still has a part", ErrCorruptMetadata, entry.Name())
+				}
 			}
 		}
 	}
