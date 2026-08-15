@@ -92,6 +92,20 @@ xionctl logs --follow
 
 `xionctl config` 查看最大上传限制；使用 `xionctl config --max-upload-size 100M` 可修改限制并自动重启 Xion。命令会备份环境文件，支持 `K`、`M`、`G` 等单位；博客自身的文件类型/大小校验仍需同步调整。
 
+普通删除现在进入回收站，不会立即释放文件数据。活动文件列表和下载不会显示回收站内容；恢复后原文件 ID 和链接保持不变：
+
+```bash
+# 查看回收站
+curl -sS "$API/api/v1/trash?limit=100&offset=0" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 恢复文件
+curl -sS -X POST "$API/api/v1/files/<file-id>/restore" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+回收站目前没有公开永久删除接口，避免误操作；后续会增加带保留期和管理员确认的清理任务。
+
 ### 可恢复分片上传
 
 1 GiB 大文件可以使用上传会话，网络中断后从 `received_bytes` 继续，不需要重新上传：
@@ -151,7 +165,7 @@ python -m pytest client/python/tests -q
 
 ## 限制
 
-当前生产数据面仍为单节点；可恢复分片会话支持服务重启后继续，但尚未替代副本、自动故障转移或跨区域容灾。必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
+当前生产数据面仍为单节点；可恢复分片会话和回收站支持服务重启后继续，但尚未替代副本、自动故障转移或跨区域容灾。必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
 
 ## License
 

@@ -199,6 +199,24 @@ Authorization: Bearer <service-token>
 
 完成接口会重新计算完整 SHA-256，并返回标准文件对象；完成后文件可使用 `/api/v1/files/{file_id}` 下载、查询和删除。中止接口幂等删除未完成会话。
 
+### 回收站与恢复
+
+普通删除是软删除：文件从活动列表和下载接口隐藏，但数据保留在回收站中。回收站占用的空间仍会计入容量统计。
+
+```http
+GET /api/v1/trash?limit=100&offset=0
+Authorization: Bearer <service-token>
+```
+
+恢复时使用原文件 ID：
+
+```http
+POST /api/v1/files/{file_id}/restore
+Authorization: Bearer <service-token>
+```
+
+恢复成功返回标准文件对象，文件 ID、校验和和下载地址保持不变。重复删除幂等；如果活动目录已经存在同 ID 文件，恢复返回 `409 file_restore_conflict`。当前版本不提供公开永久删除接口。
+
 ## 系统管理
 
 ### 健康检查
