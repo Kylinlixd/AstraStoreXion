@@ -333,6 +333,33 @@ func TestReplicationHooksAndStatus(t *testing.T) {
 	assert.Len(t, replicator.events, 3)
 }
 
+func TestReplicationManagerStreamsIntoGatewayWithStableID(t *testing.T) {
+	primaryStore, err := files.NewDiskStore(t.TempDir())
+	require.NoError(t, err)
+	remoteStore, err := files.NewDiskStore(t.TempDir())
+	require.NoError(t, err)
+	primaryService := files.NewService(primaryStore)
+	saved, err := primaryService.Upload(context.Background(), files.UploadInput{
+		Name: "replicated.txt", ContentType: "text/plain", Metadata: map[string]string{"owner": "blog"}, Reader: strings.NewReader("replica content"),
+	})
+	require.NoError(t, err)
+	server := httptest.NewServer(newRouter(gateway{service: files.NewService(remoteStore), token: "replica-token", maxUploadBytes: 1024}))
+	defer server.Close()
+
+	manager, err := replication.NewManager(primaryService, replication.Config{RemoteURL: server.URL, Token: "replica-token", JobsDir: t.TempDir()})
+	require.NoError(t, err)
+	defer manager.Close()
+	_, err = manager.EnqueueUpload(context.Background(), saved.ID)
+	require.NoError(t, err)
+	require.NoError(t, manager.ProcessPending(context.Background()))
+
+	remote, err := remoteStore.Get(context.Background(), saved.ID)
+	require.NoError(t, err)
+	assert.Equal(t, saved.ID, remote.ID)
+	assert.Equal(t, saved.Checksum, remote.Checksum)
+	assert.Equal(t, "blog", remote.Metadata["owner"])
+}
+
 type recordingReplicator struct {
 	status replication.Status
 	events []string
