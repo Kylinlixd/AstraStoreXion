@@ -95,4 +95,3 @@
 - [ ] **Step 6: Commit the documentation and readiness changes**
 
   Run `git add pkg/files/store.go pkg/files/store_test.go README.md docs/api/README.md && git commit -m "docs: describe resumable upload recovery"`.
-
