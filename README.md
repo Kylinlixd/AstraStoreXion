@@ -106,6 +106,27 @@ curl -sS -X POST "$API/api/v1/files/<file-id>/restore" \
 
 回收站目前没有公开永久删除接口，避免误操作；后续会增加带保留期和管理员确认的清理任务。
 
+### 可选主从异步复制
+
+复制默认关闭。需要副节点时，在主节点环境文件中设置：
+
+```bash
+XION_REPLICA_URL=http://replica-node:8081
+XION_REPLICA_TOKEN=<replica-service-token>
+XION_REPLICATION_DIR=/var/lib/astrastore-xion/replication
+XION_REPLICATION_MAX_ATTEMPTS=10
+```
+
+主节点上传、软删除和恢复成功后会写入持久化任务；后台任务会流式同步文件，失败时自动重试。副节点请求带有 `X-Xion-Replication: true` 标记，不会再次产生复制任务。查看状态和手动重试：
+
+```bash
+curl -sS "$API/api/v1/replication" -H "Authorization: Bearer $TOKEN"
+curl -sS -X POST "$API/api/v1/replication/<job-id>/retry" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+复制是异步的，不会回滚主节点写入；切换前应确认 `pending`、`running` 和 `failed` 任务已清空或已评估复制延迟。
+
 ### 可恢复分片上传
 
 1 GiB 大文件可以使用上传会话，网络中断后从 `received_bytes` 继续，不需要重新上传：

@@ -217,6 +217,24 @@ Authorization: Bearer <service-token>
 
 恢复成功返回标准文件对象，文件 ID、校验和和下载地址保持不变。重复删除幂等；如果活动目录已经存在同 ID 文件，恢复返回 `409 file_restore_conflict`。当前版本不提供公开永久删除接口。
 
+### 主从复制状态
+
+主从复制是可选功能，仅当服务端设置 `XION_REPLICA_URL` 和 `XION_REPLICA_TOKEN` 后启用。复制任务持久化在 `XION_REPLICATION_DIR`，服务重启后会继续处理未完成任务。
+
+```http
+GET /api/v1/replication
+Authorization: Bearer <service-token>
+```
+
+响应返回 `pending`、`running`、`failed` 和 `completed` 数量。复制失败不会撤销主节点操作，可以使用任务 ID 手动重试：
+
+```http
+POST /api/v1/replication/{job_id}/retry
+Authorization: Bearer <service-token>
+```
+
+副节点接收请求时会带 `X-Xion-Replication: true`，用于阻止复制循环。复制链路是异步的，主从切换前应先确认待同步任务和失败任务。
+
 ## 系统管理
 
 ### 健康检查
