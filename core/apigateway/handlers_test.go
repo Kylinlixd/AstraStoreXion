@@ -257,6 +257,46 @@ func TestResumableUploadRejectsInvalidChunkChecksumAndRequiresToken(t *testing.T
 	assert.Zero(t, status.ReceivedBytes)
 }
 
+func TestTrashListRestoreAndDownload(t *testing.T) {
+	router := newTestRouter(t, "test-token", 1024)
+	upload := multipartUpload(t, "/api/v1/files", "restore.txt", "text/plain", []byte("restore me"))
+	authorize(upload, "test-token")
+	created := doJSON[files.File](t, router, upload, http.StatusCreated)
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/files/"+created.ID, nil)
+	authorize(deleteRequest, "test-token")
+	deleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(deleteResponse, deleteRequest)
+	assert.Equal(t, http.StatusNoContent, deleteResponse.Code)
+
+	unauthorized := httptest.NewRequest(http.MethodGet, "/api/v1/trash", nil)
+	doJSON[apiErrorResponse](t, router, unauthorized, http.StatusUnauthorized)
+
+	trashRequest := httptest.NewRequest(http.MethodGet, "/api/v1/trash?limit=10&offset=0", nil)
+	authorize(trashRequest, "test-token")
+	trash := doJSON[fileListResponse](t, router, trashRequest, http.StatusOK)
+	require.Len(t, trash.Results, 1)
+	assert.Equal(t, created.ID, trash.Results[0].ID)
+	assert.NotNil(t, trash.Results[0].DeletedAt)
+
+	restoreRequest := httptest.NewRequest(http.MethodPost, "/api/v1/files/"+created.ID+"/restore", nil)
+	authorize(restoreRequest, "test-token")
+	restored := doJSON[files.File](t, router, restoreRequest, http.StatusOK)
+	assert.Equal(t, created.ID, restored.ID)
+
+	download := httptest.NewRequest(http.MethodGet, "/api/v1/files/"+created.ID, nil)
+	authorize(download, "test-token")
+	downloadResponse := httptest.NewRecorder()
+	router.ServeHTTP(downloadResponse, download)
+	assert.Equal(t, http.StatusOK, downloadResponse.Code)
+	assert.Equal(t, "restore me", downloadResponse.Body.String())
+
+	missingRestore := httptest.NewRequest(http.MethodPost, "/api/v1/files/b8c21d60-e970-4df5-890b-0d2dba93a654/restore", nil)
+	authorize(missingRestore, "test-token")
+	errorResponse := doJSON[apiErrorResponse](t, router, missingRestore, http.StatusNotFound)
+	assert.Equal(t, "not_found", errorResponse.Error.Code)
+}
+
 func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handler {
 	t.Helper()
 	store, err := files.NewDiskStore(t.TempDir())

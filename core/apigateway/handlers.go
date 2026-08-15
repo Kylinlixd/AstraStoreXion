@@ -37,6 +37,11 @@ type multipartService interface {
 	AbortUpload(context.Context, string) error
 }
 
+type trashService interface {
+	ListTrash(context.Context, int, int) ([]files.File, error)
+	Restore(context.Context, string) (files.File, error)
+}
+
 type gateway struct {
 	service        fileService
 	token          string
@@ -82,9 +87,14 @@ func newRouter(g gateway) http.Handler {
 	fileRouter.HandleFunc("", g.upload).Methods(http.MethodPost)
 	fileRouter.HandleFunc("", g.list).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/capacity", g.capacity).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/{id}/restore", g.restore).Methods(http.MethodPost)
 	fileRouter.HandleFunc("/{id}/status", g.status).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.download).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.delete).Methods(http.MethodDelete)
+
+	trashRouter := router.PathPrefix("/api/v1/trash").Subrouter()
+	trashRouter.Use(g.authenticate)
+	trashRouter.HandleFunc("", g.listTrash).Methods(http.MethodGet)
 
 	uploadRouter := router.PathPrefix("/api/v1/uploads").Subrouter()
 	uploadRouter.Use(g.authenticate)
@@ -269,6 +279,44 @@ func (g gateway) capacity(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, capacity)
 }
 
+func (g gateway) listTrash(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(trashService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "trash_unavailable", "trash is not enabled")
+		return
+	}
+	limit, err := queryInteger(request, "limit", 100)
+	if err != nil || limit < 1 || limit > 1000 {
+		writeError(writer, http.StatusBadRequest, "invalid_pagination", "limit must be between 1 and 1000")
+		return
+	}
+	offset, err := queryInteger(request, "offset", 0)
+	if err != nil || offset < 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_pagination", "offset must be zero or greater")
+		return
+	}
+	stored, err := service.ListTrash(request.Context(), limit, offset)
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Results: stored})
+}
+
+func (g gateway) restore(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(trashService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "trash_unavailable", "trash is not enabled")
+		return
+	}
+	stored, err := service.Restore(request.Context(), mux.Vars(request)["id"])
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, stored)
+}
+
 func (g gateway) startUpload(writer http.ResponseWriter, request *http.Request) {
 	service, ok := g.service.(multipartService)
 	if !ok {
@@ -400,6 +448,8 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, files.ErrInvalidID), errors.Is(err, files.ErrInvalidUpload):
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, files.ErrRestoreConflict):
+		writeError(writer, http.StatusConflict, "file_restore_conflict", "an active file already uses this file id")
 	case errors.Is(err, files.ErrStoragePaused):
 		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "storage_paused", "存储空间已达到安全阈值，暂时停止上传；已有文件仍可读取，释放空间后会自动恢复。", true)
 	case errors.Is(err, files.ErrNotFound):
