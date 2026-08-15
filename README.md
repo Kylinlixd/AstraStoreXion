@@ -15,6 +15,7 @@ AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前�
 - `xionctl` 服务器命令：健康检查、列表、详情、上传、下载和安全删除。
 - `xionctl logs` 查看 Xion systemd 节点运行日志。
 - 容量保护：按文件系统使用率自动暂停新上传，空间释放后自动恢复；`xionctl capacity` 可查看容量和暂停状态。
+- 按用户配额：可按 `metadata.owner` 设置独立逻辑上限，活动文件、回收站和未完成分片预留都会计入；超额上传返回 HTTP 507。
 - 博客双存储：新文件走 Xion，历史 `/media/` 保持可用。
 
 仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
@@ -89,6 +90,21 @@ xionctl logs --follow
 `xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
 
 生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。`xionctl capacity` 使用类似 Linux `df -h` 的表格显示总容量、已用、可用、使用率和上传状态。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
+
+如需给博客或其他租户设置逻辑配额，在服务环境文件中配置字节数（`0` 表示关闭）：
+
+```bash
+XION_OWNER_QUOTA_BYTES=10737418240 # 10 GiB，所有 owner 使用同一上限
+```
+
+上传元数据中的 `owner` 作为配额键，缺省值为 `_anonymous`。配额统计包含活动文件、回收站文件以及未完成分片会话声明的完整大小；达到上限时返回 HTTP 507 和 `quota_exceeded`，客户端可提示用户清理回收站或删除文件。查询某个 owner：
+
+```bash
+curl -sS "$API/api/v1/files/quota?owner=blog" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+配额与文件系统 90% 自动暂停是两层独立保护：前者限制单个 owner，后者保护整块磁盘。
 
 `xionctl config` 查看最大上传限制；使用 `xionctl config --max-upload-size 100M` 可修改限制并自动重启 Xion。命令会备份环境文件，支持 `K`、`M`、`G` 等单位；博客自身的文件类型/大小校验仍需同步调整。
 

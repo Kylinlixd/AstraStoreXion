@@ -235,6 +235,29 @@ Authorization: Bearer <service-token>
 
 副节点接收请求时会带 `X-Xion-Replication: true`，用于阻止复制循环。复制链路是异步的，主从切换前应先确认待同步任务和失败任务。
 
+### 查询 owner 配额
+
+当服务设置了 `XION_OWNER_QUOTA_BYTES`（单位为字节，`0` 表示关闭）时，可通过上传元数据中的 `owner` 为博客或租户隔离逻辑容量。活动文件、回收站文件和未完成分片的声明大小都会计入使用量。
+
+```http
+GET /api/v1/files/quota?owner=blog
+Authorization: Bearer <service-token>
+```
+
+响应示例：
+
+```json
+{
+  "owner": "blog",
+  "limit_bytes": 10737418240,
+  "used_bytes": 734003200,
+  "available_bytes": 10001412096,
+  "used_percent": 6.8359375
+}
+```
+
+上传超过 owner 配额返回 `507 quota_exceeded`，响应同时包含 `retryable: true` 和面向客户端的清理提示。未提供 `owner` 时使用 `_anonymous`。
+
 ## 系统管理
 
 ### 健康检查
