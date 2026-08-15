@@ -363,9 +363,9 @@ func (m *Manager) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = m.ProcessPending(ctx), m.retryInterval
+			_ = m.ProcessPending(ctx)
 		case <-m.wake:
-			_, _ = m.ProcessPending(ctx), m.retryInterval
+			_ = m.ProcessPending(ctx)
 		}
 	}
 }
