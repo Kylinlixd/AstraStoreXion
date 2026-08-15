@@ -43,12 +43,21 @@ func TestReplicationUploadAndDeleteJobs(t *testing.T) {
 			_, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 			require.NoError(t, err)
 			reader := mustMultipartReader(t, request, params["boundary"])
-			part, err := reader.NextPart()
-			require.NoError(t, err)
-			assert.Equal(t, "file", part.FormName())
-			contents, err := io.ReadAll(part)
-			require.NoError(t, err)
-			assert.Equal(t, "replicated bytes", string(contents))
+			seenFile := false
+			for {
+				part, err := reader.NextPart()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				require.NoError(t, err)
+				contents, err := io.ReadAll(part)
+				require.NoError(t, err)
+				if part.FormName() == "file" {
+					seenFile = true
+					assert.Equal(t, "replicated bytes", string(contents))
+				}
+			}
+			assert.True(t, seenFile)
 			uploaded.Store(true)
 			writer.WriteHeader(http.StatusCreated)
 		case http.MethodDelete:

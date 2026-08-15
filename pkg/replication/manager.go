@@ -499,20 +499,20 @@ func streamMultipart(stored files.File, source io.ReadCloser) (io.ReadCloser, st
 	contentType := multipartWriter.FormDataContentType()
 	go func() {
 		defer source.Close()
-		part, err := multipartWriter.CreateFormFile("file", stored.Name)
+		metadataPart, err := multipartWriter.CreateFormField("metadata")
 		if err == nil {
-			_, err = io.Copy(part, source)
+			encoded, encodeErr := json.Marshal(stored.Metadata)
+			if encodeErr != nil {
+				err = encodeErr
+			} else {
+				_, err = metadataPart.Write(encoded)
+			}
 		}
-		if err == nil && stored.Metadata != nil {
-			var metadataPart io.Writer
-			metadataPart, err = multipartWriter.CreateFormField("metadata")
+		if err == nil {
+			var part io.Writer
+			part, err = multipartWriter.CreateFormFile("file", stored.Name)
 			if err == nil {
-				encoded, encodeErr := json.Marshal(stored.Metadata)
-				if encodeErr != nil {
-					err = encodeErr
-				} else {
-					_, err = metadataPart.Write(encoded)
-				}
+				_, err = io.Copy(part, source)
 			}
 		}
 		if err == nil {
