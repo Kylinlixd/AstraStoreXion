@@ -78,3 +78,14 @@ func TestDiskStoreTrashDeleteIsIdempotentAndRestoreConflicts(t *testing.T) {
 	_, err = store.Restore(context.Background(), saved.ID)
 	assert.ErrorIs(t, err, ErrRestoreConflict)
 }
+
+func TestDiskStorePutUsesStableReplicationIDAndRejectsDuplicate(t *testing.T) {
+	store, err := NewDiskStore(t.TempDir())
+	require.NoError(t, err)
+	const stableID = "b8c21d60-e970-4df5-890b-0d2dba93a654"
+	saved, err := store.Put(context.Background(), UploadInput{ID: stableID, Name: "stable.txt", Reader: strings.NewReader("stable")})
+	require.NoError(t, err)
+	assert.Equal(t, stableID, saved.ID)
+	_, err = store.Put(context.Background(), UploadInput{ID: stableID, Name: "stable.txt", Reader: strings.NewReader("stable")})
+	assert.ErrorIs(t, err, ErrFileExists)
+}

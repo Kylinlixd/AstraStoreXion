@@ -2,6 +2,8 @@ package replication
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"mime"
@@ -33,8 +35,11 @@ func TestReplicationUploadAndDeleteJobs(t *testing.T) {
 		assert.Equal(t, "Bearer replica-secret", request.Header.Get("Authorization"))
 		assert.Equal(t, "true", request.Header.Get("X-Xion-Replication"))
 		switch request.Method {
+		case http.MethodGet:
+			writer.WriteHeader(http.StatusNotFound)
 		case http.MethodPost:
 			assert.Equal(t, "/api/v1/files", request.URL.Path)
+			assert.Equal(t, "file-1", request.Header.Get("X-Xion-Replication-File-ID"))
 			_, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 			require.NoError(t, err)
 			reader := mustMultipartReader(t, request, params["boundary"])
@@ -80,6 +85,10 @@ func TestReplicationUploadAndDeleteJobs(t *testing.T) {
 func TestReplicationReloadsJobsAndRetriesFailures(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if attempts.Add(1) == 1 {
 			writer.WriteHeader(http.StatusBadGateway)
 			return
@@ -134,9 +143,40 @@ func TestReplicationRetryAndRestoreJob(t *testing.T) {
 	assert.Equal(t, JobPending, manager.job(job.ID).Status)
 }
 
+func TestReplicationUploadSkipsAlreadySynchronizedStableFile(t *testing.T) {
+	var postCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			assert.Equal(t, "/api/v1/files/file-4/status", request.URL.Path)
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte(`{"file_id":"file-4","filename":"four.txt","size":4,"checksum":"` + sha256Hex("four") + `","status":"available"}`))
+			return
+		}
+		postCalls.Add(1)
+		writer.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	manager, err := NewManager(fakeSource{file: files.File{ID: "file-4", Name: "four.txt", Size: 4, Checksum: sha256Hex("four")}, body: "four"}, Config{
+		RemoteURL: server.URL, Token: "secret", JobsDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	_, err = manager.EnqueueUpload(context.Background(), "file-4")
+	require.NoError(t, err)
+	require.NoError(t, manager.ProcessPending(context.Background()))
+	assert.Zero(t, postCalls.Load())
+}
+
 func mustMultipartReader(t *testing.T, request *http.Request, mediaType string) *multipart.Reader {
 	t.Helper()
 	return multipart.NewReader(request.Body, mediaType)
+}
+
+func sha256Hex(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(hash[:])
 }
 
 func TestReplicationConfigRejectsMissingRemote(t *testing.T) {

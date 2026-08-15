@@ -321,12 +321,25 @@ func (m *Manager) replicateUpload(ctx context.Context, fileID string) error {
 	if err != nil {
 		return fmt.Errorf("open source object: %w", err)
 	}
+	alreadySynchronized, err := m.remoteFileMatches(ctx, stored)
+	if err != nil {
+		_ = body.Close()
+		return err
+	}
+	if alreadySynchronized {
+		_ = body.Close()
+		return nil
+	}
 	multipartBody, contentType := streamMultipart(stored, body)
 	defer multipartBody.Close()
-	return m.mutateRemote(ctx, http.MethodPost, "/api/v1/files", multipartBody, contentType, false)
+	return m.mutateRemoteWithID(ctx, http.MethodPost, "/api/v1/files", multipartBody, contentType, stored.ID, false)
 }
 
 func (m *Manager) mutateRemote(ctx context.Context, method, path string, body io.ReadCloser, contentType string, notFoundOK bool) error {
+	return m.mutateRemoteWithID(ctx, method, path, body, contentType, "", notFoundOK)
+}
+
+func (m *Manager) mutateRemoteWithID(ctx context.Context, method, path string, body io.ReadCloser, contentType, fileID string, notFoundOK bool) error {
 	if body != nil {
 		defer body.Close()
 	}
@@ -336,6 +349,9 @@ func (m *Manager) mutateRemote(ctx context.Context, method, path string, body io
 	}
 	request.Header.Set("Authorization", "Bearer "+m.token)
 	request.Header.Set("X-Xion-Replication", "true")
+	if fileID != "" {
+		request.Header.Set("X-Xion-Replication-File-ID", fileID)
+	}
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
@@ -352,6 +368,34 @@ func (m *Manager) mutateRemote(ctx context.Context, method, path string, body io
 	}
 	detail, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
 	return fmt.Errorf("replica returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
+}
+
+func (m *Manager) remoteFileMatches(ctx context.Context, stored files.File) (bool, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.remoteURL+"/api/v1/files/"+url.PathEscape(stored.ID)+"/status", nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Authorization", "Bearer "+m.token)
+	request.Header.Set("X-Xion-Replication", "true")
+	response, err := m.client.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("replica status check returned HTTP %d", response.StatusCode)
+	}
+	var remote files.File
+	if err := json.NewDecoder(response.Body).Decode(&remote); err != nil {
+		return false, fmt.Errorf("decode replica status: %w", err)
+	}
+	if remote.ID != stored.ID || remote.Size != stored.Size || !strings.EqualFold(remote.Checksum, stored.Checksum) {
+		return false, fmt.Errorf("replica file %s has a different checksum or size", stored.ID)
+	}
+	return true, nil
 }
 
 func (m *Manager) worker(ctx context.Context) {

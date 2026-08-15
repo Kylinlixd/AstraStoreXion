@@ -19,6 +19,7 @@ var (
 	ErrUploadTooLarge         = errors.New("upload exceeds declared size")
 	ErrUploadChunkSize        = errors.New("upload chunk size mismatch")
 	ErrRestoreConflict        = errors.New("file restore conflict")
+	ErrFileExists             = errors.New("file already exists")
 )
 
 const StatusAvailable = "available"
@@ -38,6 +39,7 @@ type File struct {
 }
 
 type UploadInput struct {
+	ID          string
 	Name        string
 	ContentType string
 	Metadata    map[string]string

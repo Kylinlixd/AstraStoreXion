@@ -139,6 +139,11 @@ func (g gateway) authenticate(next http.Handler) http.Handler {
 }
 
 func (g gateway) upload(writer http.ResponseWriter, request *http.Request) {
+	replicationFileID := strings.TrimSpace(request.Header.Get("X-Xion-Replication-File-ID"))
+	if replicationFileID != "" && request.Header.Get("X-Xion-Replication") != "true" {
+		writeError(writer, http.StatusBadRequest, "invalid_replication_request", "replication file id requires the internal replication marker")
+		return
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, g.maxUploadBytes+(1<<20))
 	multipartReader, err := request.MultipartReader()
 	if err != nil {
@@ -197,6 +202,7 @@ func (g gateway) upload(writer http.ResponseWriter, request *http.Request) {
 			}
 			fileSeen = true
 			created, err = g.service.Upload(request.Context(), files.UploadInput{
+				ID:          replicationFileID,
 				Name:        part.FileName(),
 				ContentType: part.Header.Get("Content-Type"),
 				Metadata:    metadata,
@@ -521,6 +527,8 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, files.ErrInvalidID), errors.Is(err, files.ErrInvalidUpload):
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, files.ErrFileExists):
+		writeError(writer, http.StatusConflict, "file_exists", "file id already exists")
 	case errors.Is(err, files.ErrRestoreConflict):
 		writeError(writer, http.StatusConflict, "file_restore_conflict", "an active file already uses this file id")
 	case errors.Is(err, files.ErrStoragePaused):

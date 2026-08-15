@@ -99,7 +99,12 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 		return File{}, err
 	}
 
-	fileID := uuid.NewString()
+	fileID := strings.TrimSpace(input.ID)
+	if fileID == "" {
+		fileID = uuid.NewString()
+	} else if err := validateID(fileID); err != nil {
+		return File{}, err
+	}
 	temporaryPath := filepath.Join(s.tmpDir, fileID+".part")
 	objectPath := filepath.Join(s.objectsDir, fileID)
 	manifestPath := filepath.Join(s.metadataDir, fileID+".json")
@@ -112,6 +117,9 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 	}
 	if paused {
 		return File{}, ErrStoragePaused
+	}
+	if pathExists(objectPath) || pathExists(manifestPath) || pathExists(filepath.Join(s.trashDir, fileID)) {
+		return File{}, ErrFileExists
 	}
 
 	temporary, err := os.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
