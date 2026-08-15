@@ -10,10 +10,12 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
+	"github.com/astrastore/astrastore-xion/pkg/replication"
 	"github.com/gorilla/mux"
 )
 
@@ -42,10 +44,19 @@ type trashService interface {
 	Restore(context.Context, string) (files.File, error)
 }
 
+type replicationEnqueuer interface {
+	EnqueueUpload(context.Context, string) (replication.Job, error)
+	EnqueueDelete(context.Context, string) (replication.Job, error)
+	EnqueueRestore(context.Context, string) (replication.Job, error)
+	Status() replication.Status
+	Retry(context.Context, string) error
+}
+
 type gateway struct {
 	service        fileService
 	token          string
 	maxUploadBytes int64
+	replicator     replicationEnqueuer
 }
 
 type fileListResponse struct {
@@ -95,6 +106,11 @@ func newRouter(g gateway) http.Handler {
 	trashRouter := router.PathPrefix("/api/v1/trash").Subrouter()
 	trashRouter.Use(g.authenticate)
 	trashRouter.HandleFunc("", g.listTrash).Methods(http.MethodGet)
+
+	replicationRouter := router.PathPrefix("/api/v1/replication").Subrouter()
+	replicationRouter.Use(g.authenticate)
+	replicationRouter.HandleFunc("", g.replicationStatus).Methods(http.MethodGet)
+	replicationRouter.HandleFunc("/{id}/retry", g.retryReplication).Methods(http.MethodPost)
 
 	uploadRouter := router.PathPrefix("/api/v1/uploads").Subrouter()
 	uploadRouter.Use(g.authenticate)
@@ -210,6 +226,7 @@ func (g gateway) upload(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, "file_required", "multipart field 'file' is required")
 		return
 	}
+	g.enqueueUpload(request, created.ID)
 	writeJSON(writer, http.StatusCreated, created)
 }
 
@@ -303,6 +320,58 @@ func (g gateway) listTrash(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Results: stored})
 }
 
+func (g gateway) replicationStatus(writer http.ResponseWriter, _ *http.Request) {
+	if g.replicator == nil {
+		writeJSON(writer, http.StatusOK, replication.Status{Enabled: false})
+		return
+	}
+	writeJSON(writer, http.StatusOK, g.replicator.Status())
+}
+
+func (g gateway) retryReplication(writer http.ResponseWriter, request *http.Request) {
+	if g.replicator == nil {
+		writeError(writer, http.StatusNotImplemented, "replication_unavailable", "replication is not enabled")
+		return
+	}
+	if err := g.replicator.Retry(request.Context(), mux.Vars(request)["id"]); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(writer, http.StatusNotFound, "replication_job_not_found", "replication job does not exist")
+			return
+		}
+		log.Printf("retry replication job: %v", err)
+		writeError(writer, http.StatusInternalServerError, "replication_retry_failed", "replication retry could not be queued")
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, statusResponse{Status: "queued"})
+}
+
+func (g gateway) enqueueUpload(request *http.Request, fileID string) {
+	if g.replicator == nil || request.Header.Get("X-Xion-Replication") == "true" {
+		return
+	}
+	if _, err := g.replicator.EnqueueUpload(request.Context(), fileID); err != nil {
+		log.Printf("enqueue upload replication %s: %v", fileID, err)
+	}
+}
+
+func (g gateway) enqueueDelete(request *http.Request, fileID string) {
+	if g.replicator == nil || request.Header.Get("X-Xion-Replication") == "true" {
+		return
+	}
+	if _, err := g.replicator.EnqueueDelete(request.Context(), fileID); err != nil {
+		log.Printf("enqueue delete replication %s: %v", fileID, err)
+	}
+}
+
+func (g gateway) enqueueRestore(request *http.Request, fileID string) {
+	if g.replicator == nil || request.Header.Get("X-Xion-Replication") == "true" {
+		return
+	}
+	if _, err := g.replicator.EnqueueRestore(request.Context(), fileID); err != nil {
+		log.Printf("enqueue restore replication %s: %v", fileID, err)
+	}
+}
+
 func (g gateway) restore(writer http.ResponseWriter, request *http.Request) {
 	service, ok := g.service.(trashService)
 	if !ok {
@@ -314,6 +383,7 @@ func (g gateway) restore(writer http.ResponseWriter, request *http.Request) {
 		handleServiceError(writer, err)
 		return
 	}
+	g.enqueueRestore(request, stored.ID)
 	writeJSON(writer, http.StatusOK, stored)
 }
 
@@ -408,6 +478,7 @@ func (g gateway) completeUpload(writer http.ResponseWriter, request *http.Reques
 		handleUploadError(writer, err)
 		return
 	}
+	g.enqueueUpload(request, file.ID)
 	writeJSON(writer, http.StatusCreated, file)
 }
 
@@ -425,10 +496,12 @@ func (g gateway) abortUpload(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (g gateway) delete(writer http.ResponseWriter, request *http.Request) {
-	if err := g.service.Delete(request.Context(), mux.Vars(request)["id"]); err != nil {
+	id := mux.Vars(request)["id"]
+	if err := g.service.Delete(request.Context(), id); err != nil {
 		handleServiceError(writer, err)
 		return
 	}
+	g.enqueueDelete(request, id)
 	writer.WriteHeader(http.StatusNoContent)
 }
 

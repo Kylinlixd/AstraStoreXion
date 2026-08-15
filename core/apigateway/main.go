@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
+	"github.com/astrastore/astrastore-xion/pkg/replication"
 )
 
 const defaultMaxUploadBytes int64 = 1 << 30
@@ -45,10 +48,29 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize file store: %w", err)
 	}
+	service := files.NewService(store)
+	var replicator *replication.Manager
+	if replicaURL := strings.TrimSpace(os.Getenv("XION_REPLICA_URL")); replicaURL != "" {
+		maxAttempts, parseErr := envInt("XION_REPLICATION_MAX_ATTEMPTS", 10)
+		if parseErr != nil || maxAttempts < 1 {
+			return fmt.Errorf("XION_REPLICATION_MAX_ATTEMPTS must be a positive integer")
+		}
+		jobsDir := envOrDefault("XION_REPLICATION_DIR", filepath.Join(dataDirectory, "replication"))
+		replicator, err = replication.NewManager(service, replication.Config{
+			RemoteURL: replicaURL, Token: os.Getenv("XION_REPLICA_TOKEN"),
+			JobsDir: jobsDir, MaxAttempts: maxAttempts,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize replication: %w", err)
+		}
+		replicator.Start()
+		defer replicator.Close()
+		log.Printf("Xion replication enabled: %s", replicaURL)
+	}
 	address := envOrDefault("XION_LISTEN_ADDR", "127.0.0.1:8081")
 	server := &http.Server{
 		Addr:              address,
-		Handler:           newRouter(gateway{service: files.NewService(store), token: token, maxUploadBytes: maxUploadBytes}),
+		Handler:           newRouter(gateway{service: service, token: token, maxUploadBytes: maxUploadBytes, replicator: replicator}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Minute,
 		WriteTimeout:      30 * time.Minute,

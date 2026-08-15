@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
+	"github.com/astrastore/astrastore-xion/pkg/replication"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -296,6 +297,64 @@ func TestTrashListRestoreAndDownload(t *testing.T) {
 	errorResponse := doJSON[apiErrorResponse](t, router, missingRestore, http.StatusNotFound)
 	assert.Equal(t, "not_found", errorResponse.Error.Code)
 }
+
+func TestReplicationHooksAndStatus(t *testing.T) {
+	store, err := files.NewDiskStore(t.TempDir())
+	require.NoError(t, err)
+	replicator := &recordingReplicator{status: replication.Status{Enabled: true}}
+	router := newRouter(gateway{service: files.NewService(store), token: "test-token", maxUploadBytes: 1024, replicator: replicator})
+
+	upload := multipartUpload(t, "/api/v1/files", "replicate.txt", "text/plain", []byte("replicate"))
+	authorize(upload, "test-token")
+	created := doJSON[files.File](t, router, upload, http.StatusCreated)
+	assert.Equal(t, []string{"upload:" + created.ID}, replicator.events)
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/files/"+created.ID, nil)
+	authorize(deleteRequest, "test-token")
+	deleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(deleteResponse, deleteRequest)
+	assert.Equal(t, http.StatusNoContent, deleteResponse.Code)
+	assert.Equal(t, []string{"upload:" + created.ID, "delete:" + created.ID}, replicator.events)
+
+	restoreRequest := httptest.NewRequest(http.MethodPost, "/api/v1/files/"+created.ID+"/restore", nil)
+	authorize(restoreRequest, "test-token")
+	doJSON[files.File](t, router, restoreRequest, http.StatusOK)
+	assert.Equal(t, []string{"upload:" + created.ID, "delete:" + created.ID, "restore:" + created.ID}, replicator.events)
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/replication", nil)
+	authorize(statusRequest, "test-token")
+	status := doJSON[replication.Status](t, router, statusRequest, http.StatusOK)
+	assert.True(t, status.Enabled)
+
+	markedUpload := multipartUpload(t, "/api/v1/files", "replicated-by-peer.txt", "text/plain", []byte("peer"))
+	markedUpload.Header.Set("X-Xion-Replication", "true")
+	authorize(markedUpload, "test-token")
+	doJSON[files.File](t, router, markedUpload, http.StatusCreated)
+	assert.Len(t, replicator.events, 3)
+}
+
+type recordingReplicator struct {
+	status replication.Status
+	events []string
+}
+
+func (r *recordingReplicator) EnqueueUpload(_ context.Context, fileID string) (replication.Job, error) {
+	r.events = append(r.events, "upload:"+fileID)
+	return replication.Job{}, nil
+}
+
+func (r *recordingReplicator) EnqueueDelete(_ context.Context, fileID string) (replication.Job, error) {
+	r.events = append(r.events, "delete:"+fileID)
+	return replication.Job{}, nil
+}
+
+func (r *recordingReplicator) EnqueueRestore(_ context.Context, fileID string) (replication.Job, error) {
+	r.events = append(r.events, "restore:"+fileID)
+	return replication.Job{}, nil
+}
+
+func (r *recordingReplicator) Status() replication.Status        { return r.status }
+func (*recordingReplicator) Retry(context.Context, string) error { return nil }
 
 func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handler {
 	t.Helper()

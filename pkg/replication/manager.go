@@ -199,18 +199,30 @@ func (m *Manager) Retry(ctx context.Context, jobID string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	job, ok := m.jobs[jobID]
-	if !ok {
+	jobIDs := []string{}
+	if _, ok := m.jobs[jobID]; ok {
+		jobIDs = append(jobIDs, jobID)
+	} else {
+		for id, job := range m.jobs {
+			if job.FileID == jobID && job.Status != JobCompleted {
+				jobIDs = append(jobIDs, id)
+			}
+		}
+	}
+	if len(jobIDs) == 0 {
 		return os.ErrNotExist
 	}
-	job.Status = JobPending
-	job.Attempts = 0
-	job.LastError = ""
-	job.UpdatedAt = time.Now().UTC()
-	if err := m.persistJob(job); err != nil {
-		return err
+	for _, id := range jobIDs {
+		job := m.jobs[id]
+		job.Status = JobPending
+		job.Attempts = 0
+		job.LastError = ""
+		job.UpdatedAt = time.Now().UTC()
+		if err := m.persistJob(job); err != nil {
+			return err
+		}
+		m.jobs[id] = job
 	}
-	m.jobs[jobID] = job
 	m.signal()
 	return nil
 }
