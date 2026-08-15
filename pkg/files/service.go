@@ -47,3 +47,53 @@ func (s *Service) Capacity(ctx context.Context) (Capacity, error) {
 	}
 	return provider.Capacity(ctx)
 }
+
+func (s *Service) StartUpload(ctx context.Context, input MultipartStartInput) (UploadSession, error) {
+	provider, ok := s.store.(interface {
+		StartUpload(context.Context, MultipartStartInput) (UploadSession, error)
+	})
+	if !ok {
+		return UploadSession{}, fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.StartUpload(ctx, input)
+}
+
+func (s *Service) GetUpload(ctx context.Context, id string) (UploadSession, error) {
+	provider, ok := s.store.(interface {
+		GetUpload(context.Context, string) (UploadSession, error)
+	})
+	if !ok {
+		return UploadSession{}, fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.GetUpload(ctx, id)
+}
+
+func (s *Service) AppendUpload(ctx context.Context, id string, offset int64, reader io.Reader, checksum string) (UploadSession, error) {
+	provider, ok := s.store.(interface {
+		AppendUpload(context.Context, string, int64, io.Reader, string) (UploadSession, error)
+	})
+	if !ok {
+		return UploadSession{}, fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.AppendUpload(ctx, id, offset, reader, checksum)
+}
+
+func (s *Service) CompleteUpload(ctx context.Context, id string) (File, error) {
+	provider, ok := s.store.(interface {
+		CompleteUpload(context.Context, string) (File, error)
+	})
+	if !ok {
+		return File{}, fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.CompleteUpload(ctx, id)
+}
+
+func (s *Service) AbortUpload(ctx context.Context, id string) error {
+	provider, ok := s.store.(interface {
+		AbortUpload(context.Context, string) error
+	})
+	if !ok {
+		return fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.AbortUpload(ctx, id)
+}
