@@ -18,6 +18,7 @@ var (
 	ErrUploadChecksumMismatch = errors.New("upload checksum mismatch")
 	ErrUploadTooLarge         = errors.New("upload exceeds declared size")
 	ErrUploadChunkSize        = errors.New("upload chunk size mismatch")
+	ErrRestoreConflict        = errors.New("file restore conflict")
 )
 
 const StatusAvailable = "available"
@@ -33,6 +34,7 @@ type File struct {
 	Status      string            `json:"status"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	DeletedAt   *time.Time        `json:"deleted_at,omitempty"`
 }
 
 type UploadInput struct {
@@ -72,6 +74,8 @@ type Capacity struct {
 	ObjectCount    int     `json:"object_count"`
 	ObjectBytes    int64   `json:"object_bytes"`
 	MetadataCount  int     `json:"metadata_count"`
+	TrashCount     int     `json:"trash_count"`
+	TrashBytes     int64   `json:"trash_bytes"`
 	PauseAtPercent int     `json:"pause_at_percent"`
 	WritesPaused   bool    `json:"writes_paused"`
 }

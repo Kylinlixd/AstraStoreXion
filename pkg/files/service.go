@@ -97,3 +97,23 @@ func (s *Service) AbortUpload(ctx context.Context, id string) error {
 	}
 	return provider.AbortUpload(ctx, id)
 }
+
+func (s *Service) ListTrash(ctx context.Context, limit, offset int) ([]File, error) {
+	provider, ok := s.store.(interface {
+		ListTrash(context.Context, int, int) ([]File, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("trash is unavailable")
+	}
+	return provider.ListTrash(ctx, limit, offset)
+}
+
+func (s *Service) Restore(ctx context.Context, id string) (File, error) {
+	provider, ok := s.store.(interface {
+		Restore(context.Context, string) (File, error)
+	})
+	if !ok {
+		return File{}, fmt.Errorf("trash is unavailable")
+	}
+	return provider.Restore(ctx, id)
+}

@@ -41,12 +41,18 @@ type MultipartStore interface {
 	AbortUpload(context.Context, string) error
 }
 
+type TrashStore interface {
+	ListTrash(context.Context, int, int) ([]File, error)
+	Restore(context.Context, string) (File, error)
+}
+
 type DiskStore struct {
 	root           string
 	objectsDir     string
 	metadataDir    string
 	tmpDir         string
 	uploadsDir     string
+	trashDir       string
 	pauseAtPercent int
 	statFS         func(string, *unix.Statfs_t) error
 	mu             sync.RWMutex
@@ -73,10 +79,11 @@ func NewDiskStoreWithPause(root string, pauseAtPercent int) (*DiskStore, error) 
 		metadataDir:    filepath.Join(absoluteRoot, "metadata"),
 		tmpDir:         filepath.Join(absoluteRoot, "tmp"),
 		uploadsDir:     filepath.Join(absoluteRoot, "uploads"),
+		trashDir:       filepath.Join(absoluteRoot, "trash"),
 		pauseAtPercent: pauseAtPercent,
 		statFS:         unix.Statfs,
 	}
-	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir, store.uploadsDir} {
+	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir, store.uploadsDir, store.trashDir} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return nil, fmt.Errorf("create storage directory %s: %w", directory, err)
 		}
@@ -492,11 +499,16 @@ func (s *DiskStore) capacityUnlocked() (Capacity, error) {
 	if err != nil {
 		return Capacity{}, err
 	}
+	trashCount, trashBytes, err := trashUsage(s.trashDir)
+	if err != nil {
+		return Capacity{}, err
+	}
 	paused := s.pauseAtPercent > 0 && usedPercent >= float64(s.pauseAtPercent)
 	return Capacity{
 		TotalBytes: total, UsedBytes: used, AvailableBytes: available,
 		UsedPercent: usedPercent, ObjectCount: objectCount, ObjectBytes: objectBytes,
-		MetadataCount: metadataCount, PauseAtPercent: s.pauseAtPercent, WritesPaused: paused,
+		MetadataCount: metadataCount, TrashCount: trashCount, TrashBytes: trashBytes,
+		PauseAtPercent: s.pauseAtPercent, WritesPaused: paused,
 	}, nil
 }
 
@@ -651,18 +663,175 @@ func (s *DiskStore) Delete(ctx context.Context, id string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, target := range []string{filepath.Join(s.objectsDir, id), filepath.Join(s.metadataDir, id+".json")} {
-		if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("delete file data: %w", err)
+	objectPath := filepath.Join(s.objectsDir, id)
+	manifestPath := filepath.Join(s.metadataDir, id+".json")
+	trashItemDir := filepath.Join(s.trashDir, id)
+	trashObjectPath := filepath.Join(trashItemDir, "object")
+	trashManifestPath := filepath.Join(trashItemDir, "manifest.json")
+	objectExists := pathExists(objectPath)
+	manifestExists := pathExists(manifestPath)
+	trashExists := pathExists(trashItemDir)
+	if !objectExists && !manifestExists {
+		if trashExists {
+			return nil
 		}
+		return nil
 	}
+	if !objectExists || !manifestExists || trashExists {
+		return fmt.Errorf("%w: inconsistent delete state for %s", ErrCorruptMetadata, id)
+	}
+	if err := os.Mkdir(trashItemDir, 0o750); err != nil {
+		return fmt.Errorf("create trash entry: %w", err)
+	}
+	rollbackObject := false
+	defer func() {
+		if rollbackObject {
+			_ = os.Rename(trashObjectPath, objectPath)
+			_ = os.Rename(trashManifestPath, manifestPath)
+			_ = os.RemoveAll(trashItemDir)
+		}
+	}()
+	if err := os.Rename(objectPath, trashObjectPath); err != nil {
+		_ = os.Remove(trashItemDir)
+		return fmt.Errorf("move object to trash: %w", err)
+	}
+	rollbackObject = true
 	if err := syncDirectory(s.objectsDir); err != nil {
 		return fmt.Errorf("sync object directory: %w", err)
+	}
+	if err := os.Rename(manifestPath, trashManifestPath); err != nil {
+		return fmt.Errorf("move metadata to trash: %w", err)
 	}
 	if err := syncDirectory(s.metadataDir); err != nil {
 		return fmt.Errorf("sync metadata directory: %w", err)
 	}
-	return nil
+	data, err := os.ReadFile(trashManifestPath)
+	if err != nil {
+		return fmt.Errorf("read trashed metadata: %w", err)
+	}
+	var stored File
+	if err := json.Unmarshal(data, &stored); err != nil || stored.ID != id {
+		return fmt.Errorf("%w: invalid trashed metadata %s", ErrCorruptMetadata, id)
+	}
+	deletedAt := time.Now().UTC()
+	stored.DeletedAt = &deletedAt
+	if err := writeManifest(trashManifestPath, stored); err != nil {
+		return err
+	}
+	if err := syncDirectory(trashItemDir); err != nil {
+		return fmt.Errorf("sync trash entry: %w", err)
+	}
+	rollbackObject = false
+	return syncDirectory(s.trashDir)
+}
+
+func (s *DiskStore) ListTrash(ctx context.Context, limit, offset int) ([]File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries, err := os.ReadDir(s.trashDir)
+	if err != nil {
+		return nil, fmt.Errorf("list trash: %w", err)
+	}
+	trashed := make([]File, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return nil, fmt.Errorf("%w: unexpected trash artifact %s", ErrCorruptMetadata, entry.Name())
+		}
+		if err := validateID(entry.Name()); err != nil {
+			return nil, fmt.Errorf("%w: unexpected trash entry %s", ErrCorruptMetadata, entry.Name())
+		}
+		file, err := s.getTrashUnlocked(entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		trashed = append(trashed, file)
+	}
+	sort.Slice(trashed, func(i, j int) bool {
+		if trashed[i].DeletedAt != nil && trashed[j].DeletedAt != nil && !trashed[i].DeletedAt.Equal(*trashed[j].DeletedAt) {
+			return trashed[i].DeletedAt.After(*trashed[j].DeletedAt)
+		}
+		return trashed[i].ID < trashed[j].ID
+	})
+	if offset >= len(trashed) {
+		return []File{}, nil
+	}
+	end := offset + limit
+	if end > len(trashed) {
+		end = len(trashed)
+	}
+	result := make([]File, 0, end-offset)
+	for _, file := range trashed[offset:end] {
+		result = append(result, cloneFile(file))
+	}
+	return result, nil
+}
+
+func (s *DiskStore) Restore(ctx context.Context, id string) (File, error) {
+	if err := validateID(id); err != nil {
+		return File{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return File{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	file, err := s.getTrashUnlocked(id)
+	if err != nil {
+		return File{}, err
+	}
+	objectPath := filepath.Join(s.objectsDir, id)
+	manifestPath := filepath.Join(s.metadataDir, id+".json")
+	if pathExists(objectPath) || pathExists(manifestPath) {
+		return File{}, ErrRestoreConflict
+	}
+	trashItemDir := filepath.Join(s.trashDir, id)
+	trashObjectPath := filepath.Join(trashItemDir, "object")
+	trashManifestPath := filepath.Join(trashItemDir, "manifest.json")
+	file.DeletedAt = nil
+	if err := writeManifest(trashManifestPath, file); err != nil {
+		return File{}, err
+	}
+	if err := syncDirectory(trashItemDir); err != nil {
+		return File{}, fmt.Errorf("sync trash entry: %w", err)
+	}
+	if err := os.Rename(trashObjectPath, objectPath); err != nil {
+		return File{}, fmt.Errorf("restore object: %w", err)
+	}
+	rollbackObject := true
+	defer func() {
+		if rollbackObject {
+			_ = os.Rename(objectPath, trashObjectPath)
+		}
+	}()
+	if err := syncDirectory(s.objectsDir); err != nil {
+		return File{}, fmt.Errorf("sync object directory: %w", err)
+	}
+	if err := os.Rename(trashManifestPath, manifestPath); err != nil {
+		return File{}, fmt.Errorf("restore metadata: %w", err)
+	}
+	if err := syncDirectory(s.metadataDir); err != nil {
+		return File{}, fmt.Errorf("sync metadata directory: %w", err)
+	}
+	if err := os.Remove(trashItemDir); err != nil {
+		return File{}, fmt.Errorf("remove empty trash entry: %w", err)
+	}
+	if err := syncDirectory(s.trashDir); err != nil {
+		return File{}, fmt.Errorf("sync trash directory: %w", err)
+	}
+	rollbackObject = false
+	return cloneFile(file), nil
 }
 
 func (s *DiskStore) Ready(ctx context.Context) error {
@@ -756,6 +925,36 @@ func (s *DiskStore) Ready(ctx context.Context) error {
 			}
 		}
 	}
+	trash, err := os.ReadDir(s.trashDir)
+	if err != nil {
+		return fmt.Errorf("read trash directory: %w", err)
+	}
+	for _, entry := range trash {
+		if !entry.IsDir() || validateID(entry.Name()) != nil {
+			return fmt.Errorf("%w: unexpected trash artifact %s", ErrCorruptMetadata, entry.Name())
+		}
+		children, err := os.ReadDir(filepath.Join(s.trashDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read trash entry: %w", err)
+		}
+		hasObject, hasManifest := false, false
+		for _, child := range children {
+			switch child.Name() {
+			case "object":
+				hasObject = true
+			case "manifest.json":
+				hasManifest = true
+			default:
+				return fmt.Errorf("%w: unexpected trash artifact %s/%s", ErrCorruptMetadata, entry.Name(), child.Name())
+			}
+		}
+		if !hasObject || !hasManifest {
+			return fmt.Errorf("%w: incomplete trash entry %s", ErrCorruptMetadata, entry.Name())
+		}
+		if _, err := s.getTrashUnlocked(entry.Name()); err != nil {
+			return err
+		}
+	}
 	partials, err := os.ReadDir(s.tmpDir)
 	if err != nil {
 		return fmt.Errorf("read temporary directory: %w", err)
@@ -771,6 +970,65 @@ func validateID(id string) error {
 		return fmt.Errorf("%w: %q", ErrInvalidID, id)
 	}
 	return nil
+}
+
+func (s *DiskStore) getTrashUnlocked(id string) (File, error) {
+	manifestPath := filepath.Join(s.trashDir, id, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return File{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return File{}, fmt.Errorf("read trash metadata: %w", err)
+	}
+	var stored File
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return File{}, fmt.Errorf("%w: trash %s: %v", ErrCorruptMetadata, id, err)
+	}
+	if stored.ID != id || stored.Status != StatusAvailable || stored.Size < 0 || stored.Checksum == "" || stored.DeletedAt == nil {
+		return File{}, fmt.Errorf("%w: invalid trash metadata %s", ErrCorruptMetadata, id)
+	}
+	objectPath := filepath.Join(s.trashDir, id, "object")
+	info, err := os.Stat(objectPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return File{}, fmt.Errorf("%w: trash object %s is missing", ErrCorruptMetadata, id)
+	}
+	if err != nil {
+		return File{}, fmt.Errorf("stat trash object: %w", err)
+	}
+	if info.Size() != stored.Size {
+		return File{}, fmt.Errorf("%w: trash object %s has unexpected size", ErrCorruptMetadata, id)
+	}
+	return cloneFile(stored), nil
+}
+
+func trashUsage(path string) (int, int64, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read trash directory: %w", err)
+	}
+	count := 0
+	var total int64
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return 0, 0, fmt.Errorf("%w: unexpected trash artifact %s", ErrCorruptMetadata, entry.Name())
+		}
+		info, err := os.Stat(filepath.Join(path, entry.Name(), "object"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return 0, 0, fmt.Errorf("stat trash object: %w", err)
+		}
+		count++
+		total += info.Size()
+	}
+	return count, total, nil
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func validateUploadID(id string) error {
