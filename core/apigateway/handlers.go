@@ -31,6 +31,10 @@ type fileService interface {
 	Capacity(context.Context) (files.Capacity, error)
 }
 
+type quotaService interface {
+	Quota(context.Context, string) (files.Quota, error)
+}
+
 type multipartService interface {
 	StartUpload(context.Context, files.MultipartStartInput) (files.UploadSession, error)
 	GetUpload(context.Context, string) (files.UploadSession, error)
@@ -98,6 +102,7 @@ func newRouter(g gateway) http.Handler {
 	fileRouter.HandleFunc("", g.upload).Methods(http.MethodPost)
 	fileRouter.HandleFunc("", g.list).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/capacity", g.capacity).Methods(http.MethodGet)
+	fileRouter.HandleFunc("/quota", g.quota).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}/restore", g.restore).Methods(http.MethodPost)
 	fileRouter.HandleFunc("/{id}/status", g.status).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.download).Methods(http.MethodGet)
@@ -300,6 +305,20 @@ func (g gateway) capacity(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, capacity)
+}
+
+func (g gateway) quota(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(quotaService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "quota_unavailable", "owner quotas are not enabled")
+		return
+	}
+	quota, err := service.Quota(request.Context(), request.URL.Query().Get("owner"))
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, quota)
 }
 
 func (g gateway) listTrash(writer http.ResponseWriter, request *http.Request) {
@@ -533,6 +552,8 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusConflict, "file_restore_conflict", "an active file already uses this file id")
 	case errors.Is(err, files.ErrStoragePaused):
 		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "storage_paused", "存储空间已达到安全阈值，暂时停止上传；已有文件仍可读取，释放空间后会自动恢复。", true)
+	case errors.Is(err, files.ErrQuotaExceeded):
+		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "quota_exceeded", "该存储用户的配额已用尽，请删除或清理文件后再上传。", true)
 	case errors.Is(err, files.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", "file does not exist")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -560,6 +581,8 @@ func handleUploadError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusUnprocessableEntity, "upload_checksum_mismatch", "upload checksum does not match")
 	case errors.Is(err, files.ErrStoragePaused):
 		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "storage_paused", "存储空间已达到安全阈值，暂时停止上传；释放空间后会自动恢复。", true)
+	case errors.Is(err, files.ErrQuotaExceeded):
+		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "quota_exceeded", "该存储用户的配额已用尽，请删除或清理文件后再上传。", true)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(writer, http.StatusRequestTimeout, "request_timeout", "request was cancelled or timed out")
 	default:

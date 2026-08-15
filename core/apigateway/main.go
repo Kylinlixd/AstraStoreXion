@@ -44,7 +44,11 @@ func run(ctx context.Context) error {
 	if err != nil || pauseAtPercent < 0 || pauseAtPercent > 100 {
 		return fmt.Errorf("XION_STORAGE_PAUSE_AT_PERCENT must be between 0 and 100")
 	}
-	store, err = files.NewDiskStoreWithPause(dataDirectory, pauseAtPercent)
+	ownerQuotaBytes, err := envInt64("XION_OWNER_QUOTA_BYTES", 0)
+	if err != nil || ownerQuotaBytes < 0 {
+		return fmt.Errorf("XION_OWNER_QUOTA_BYTES must be zero or a positive integer")
+	}
+	store, err = files.NewDiskStoreWithPauseAndQuota(dataDirectory, pauseAtPercent, ownerQuotaBytes)
 	if err != nil {
 		return fmt.Errorf("initialize file store: %w", err)
 	}

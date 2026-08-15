@@ -360,6 +360,28 @@ func TestReplicationManagerStreamsIntoGatewayWithStableID(t *testing.T) {
 	assert.Equal(t, "blog", remote.Metadata["owner"])
 }
 
+func TestOwnerQuotaEndpointAndUploadError(t *testing.T) {
+	store, err := files.NewDiskStoreWithPauseAndQuota(t.TempDir(), 0, 10)
+	require.NoError(t, err)
+	router := newRouter(gateway{service: files.NewService(store), token: "test-token", maxUploadBytes: 1024})
+
+	// The service receives the owner through the metadata JSON, matching the blog adapter contract.
+	first := multipartUploadWithMetadata(t, "/api/v1/files", "quota.txt", "text/plain", []byte("123456"), map[string]string{"owner": "blog"})
+	authorize(first, "test-token")
+	doJSON[files.File](t, router, first, http.StatusCreated)
+
+	quotaRequest := httptest.NewRequest(http.MethodGet, "/api/v1/files/quota?owner=blog", nil)
+	authorize(quotaRequest, "test-token")
+	quota := doJSON[files.Quota](t, router, quotaRequest, http.StatusOK)
+	assert.Equal(t, int64(6), quota.UsedBytes)
+	assert.Equal(t, int64(4), quota.AvailableBytes)
+
+	second := multipartUploadWithMetadata(t, "/api/v1/files", "too-large.txt", "text/plain", []byte("12345"), map[string]string{"owner": "blog"})
+	authorize(second, "test-token")
+	errorResponse := doJSON[apiErrorResponse](t, router, second, http.StatusInsufficientStorage)
+	assert.Equal(t, "quota_exceeded", errorResponse.Error.Code)
+}
+
 type recordingReplicator struct {
 	status replication.Status
 	events []string
@@ -402,6 +424,26 @@ func multipartUpload(t *testing.T, target, filename, contentType string, content
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	require.NoError(t, err)
+	_, err = part.Write(contents)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	request := httptest.NewRequest(http.MethodPost, target, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	return request
+}
+
+func multipartUploadWithMetadata(t *testing.T, target, filename, contentType string, contents []byte, metadata map[string]string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	encoded, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("metadata", string(encoded)))
 	header := make(textproto.MIMEHeader)
 	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
 	header.Set("Content-Type", contentType)
