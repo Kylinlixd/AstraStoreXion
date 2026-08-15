@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,80 @@ func TestUploadMapsStoragePausedToInsufficientStorage(t *testing.T) {
 	assert.Equal(t, "storage_paused", response.Error.Code)
 }
 
+func TestResumableUploadLifecycle(t *testing.T) {
+	router := newTestRouter(t, "test-token", 1024)
+	startRequest := httptest.NewRequest(http.MethodPost, "/api/v1/uploads", stringsReader(`{"filename":"large.txt","content_type":"text/plain","size":11,"checksum":"`+sha256Hex("hello world")+`","metadata":{"owner":"blog"}}`))
+	startRequest.Header.Set("Content-Type", "application/json")
+	authorize(startRequest, "test-token")
+	session := doJSON[files.UploadSession](t, router, startRequest, http.StatusCreated)
+	assert.Equal(t, files.UploadStatusUploading, session.Status)
+	assert.Zero(t, session.ReceivedBytes)
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/"+session.ID, nil)
+	authorize(statusRequest, "test-token")
+	status := doJSON[files.UploadSession](t, router, statusRequest, http.StatusOK)
+	assert.Equal(t, session.ID, status.ID)
+
+	firstChunk := httptest.NewRequest(http.MethodPut, "/api/v1/uploads/"+session.ID, stringsReader("hello "))
+	firstChunk.Header.Set("Content-Range", "bytes 0-5/11")
+	authorize(firstChunk, "test-token")
+	updated := doJSON[files.UploadSession](t, router, firstChunk, http.StatusOK)
+	assert.EqualValues(t, 6, updated.ReceivedBytes)
+
+	wrongOffset := httptest.NewRequest(http.MethodPut, "/api/v1/uploads/"+session.ID, stringsReader("world"))
+	wrongOffset.Header.Set("Content-Range", "bytes 0-4/11")
+	authorize(wrongOffset, "test-token")
+	offsetError := doJSON[apiErrorResponse](t, router, wrongOffset, http.StatusConflict)
+	assert.Equal(t, "upload_offset_conflict", offsetError.Error.Code)
+
+	incomplete := httptest.NewRequest(http.MethodPost, "/api/v1/uploads/"+session.ID+"/complete", nil)
+	authorize(incomplete, "test-token")
+	incompleteError := doJSON[apiErrorResponse](t, router, incomplete, http.StatusConflict)
+	assert.Equal(t, "upload_incomplete", incompleteError.Error.Code)
+
+	secondChunk := httptest.NewRequest(http.MethodPut, "/api/v1/uploads/"+session.ID, stringsReader("world"))
+	secondChunk.Header.Set("Content-Range", "bytes 6-10/11")
+	secondChunk.Header.Set("X-Chunk-Checksum", sha256Hex("world"))
+	authorize(secondChunk, "test-token")
+	done := doJSON[files.UploadSession](t, router, secondChunk, http.StatusOK)
+	assert.EqualValues(t, 11, done.ReceivedBytes)
+
+	complete := httptest.NewRequest(http.MethodPost, "/api/v1/uploads/"+session.ID+"/complete", nil)
+	authorize(complete, "test-token")
+	created := doJSON[files.File](t, router, complete, http.StatusCreated)
+	assert.Equal(t, sha256Hex("hello world"), created.Checksum)
+	assert.Equal(t, files.StatusAvailable, created.Status)
+
+	completedStatus := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/"+session.ID, nil)
+	authorize(completedStatus, "test-token")
+	completed := doJSON[files.UploadSession](t, router, completedStatus, http.StatusOK)
+	assert.Equal(t, files.UploadStatusCompleted, completed.Status)
+	assert.Equal(t, created.ID, completed.FileID)
+}
+
+func TestResumableUploadRejectsInvalidChunkChecksumAndRequiresToken(t *testing.T) {
+	router := newTestRouter(t, "test-token", 1024)
+	unauthorized := httptest.NewRequest(http.MethodPost, "/api/v1/uploads", stringsReader(`{"filename":"file.txt","size":4}`))
+	doJSON[apiErrorResponse](t, router, unauthorized, http.StatusUnauthorized)
+
+	startRequest := httptest.NewRequest(http.MethodPost, "/api/v1/uploads", stringsReader(`{"filename":"file.txt","size":4}`))
+	startRequest.Header.Set("Content-Type", "application/json")
+	authorize(startRequest, "test-token")
+	session := doJSON[files.UploadSession](t, router, startRequest, http.StatusCreated)
+
+	chunk := httptest.NewRequest(http.MethodPut, "/api/v1/uploads/"+session.ID, stringsReader("data"))
+	chunk.Header.Set("Content-Range", "bytes 0-3/4")
+	chunk.Header.Set("X-Chunk-Checksum", strings.Repeat("0", 64))
+	authorize(chunk, "test-token")
+	errorResponse := doJSON[apiErrorResponse](t, router, chunk, http.StatusUnprocessableEntity)
+	assert.Equal(t, "upload_checksum_mismatch", errorResponse.Error.Code)
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/"+session.ID, nil)
+	authorize(statusRequest, "test-token")
+	status := doJSON[files.UploadSession](t, router, statusRequest, http.StatusOK)
+	assert.Zero(t, status.ReceivedBytes)
+}
+
 func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handler {
 	t.Helper()
 	store, err := files.NewDiskStore(t.TempDir())
@@ -191,6 +266,10 @@ func newTestRouter(t *testing.T, token string, maxUploadBytes int64) http.Handle
 		token:          token,
 		maxUploadBytes: maxUploadBytes,
 	})
+}
+
+func stringsReader(value string) io.Reader {
+	return strings.NewReader(value)
 }
 
 func multipartUpload(t *testing.T, target, filename, contentType string, contents []byte) *http.Request {

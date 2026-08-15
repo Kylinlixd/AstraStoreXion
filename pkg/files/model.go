@@ -17,6 +17,7 @@ var (
 	ErrUploadIncomplete       = errors.New("upload is incomplete")
 	ErrUploadChecksumMismatch = errors.New("upload checksum mismatch")
 	ErrUploadTooLarge         = errors.New("upload exceeds declared size")
+	ErrUploadChunkSize        = errors.New("upload chunk size mismatch")
 )
 
 const StatusAvailable = "available"

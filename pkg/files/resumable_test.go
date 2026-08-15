@@ -24,7 +24,7 @@ func TestDiskStoreResumableUploadPersistsOffsetAcrossRestart(t *testing.T) {
 	assert.Equal(t, UploadStatusUploading, session.Status)
 	assert.Zero(t, session.ReceivedBytes)
 
-	updated, err := first.AppendUpload(context.Background(), session.ID, 0, strings.NewReader("hello "), "")
+	updated, err := first.AppendUpload(context.Background(), session.ID, 0, 6, strings.NewReader("hello "), "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 6, updated.ReceivedBytes)
 
@@ -42,10 +42,10 @@ func TestDiskStoreResumableUploadRejectsOffsetAndChunkChecksum(t *testing.T) {
 	session, err := store.StartUpload(context.Background(), MultipartStartInput{Name: "file.txt", Size: 5})
 	require.NoError(t, err)
 
-	_, err = store.AppendUpload(context.Background(), session.ID, 1, strings.NewReader("hello"), "")
+	_, err = store.AppendUpload(context.Background(), session.ID, 1, 5, strings.NewReader("hello"), "")
 	assert.ErrorIs(t, err, ErrUploadOffsetConflict)
 
-	_, err = store.AppendUpload(context.Background(), session.ID, 0, strings.NewReader("hello"), strings.Repeat("0", 64))
+	_, err = store.AppendUpload(context.Background(), session.ID, 0, 5, strings.NewReader("hello"), strings.Repeat("0", 64))
 	assert.ErrorIs(t, err, ErrUploadChecksumMismatch)
 	updated, err := store.GetUpload(context.Background(), session.ID)
 	require.NoError(t, err)
@@ -62,12 +62,12 @@ func TestDiskStoreResumableUploadCompletesAtomicallyAndValidatesChecksum(t *test
 	})
 	require.NoError(t, err)
 
-	_, err = store.AppendUpload(context.Background(), session.ID, 0, strings.NewReader("hello"), "")
+	_, err = store.AppendUpload(context.Background(), session.ID, 0, 5, strings.NewReader("hello"), "")
 	require.NoError(t, err)
 	_, err = store.CompleteUpload(context.Background(), session.ID)
 	assert.ErrorIs(t, err, ErrUploadIncomplete)
 
-	_, err = store.AppendUpload(context.Background(), session.ID, 5, strings.NewReader(" world"), sha256String(" world"))
+	_, err = store.AppendUpload(context.Background(), session.ID, 5, 6, strings.NewReader(" world"), sha256String(" world"))
 	require.NoError(t, err)
 	created, err := store.CompleteUpload(context.Background(), session.ID)
 	require.NoError(t, err)

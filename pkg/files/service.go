@@ -68,14 +68,14 @@ func (s *Service) GetUpload(ctx context.Context, id string) (UploadSession, erro
 	return provider.GetUpload(ctx, id)
 }
 
-func (s *Service) AppendUpload(ctx context.Context, id string, offset int64, reader io.Reader, checksum string) (UploadSession, error) {
+func (s *Service) AppendUpload(ctx context.Context, id string, offset, chunkSize int64, reader io.Reader, checksum string) (UploadSession, error) {
 	provider, ok := s.store.(interface {
-		AppendUpload(context.Context, string, int64, io.Reader, string) (UploadSession, error)
+		AppendUpload(context.Context, string, int64, int64, io.Reader, string) (UploadSession, error)
 	})
 	if !ok {
 		return UploadSession{}, fmt.Errorf("resumable uploads are unavailable")
 	}
-	return provider.AppendUpload(ctx, id, offset, reader, checksum)
+	return provider.AppendUpload(ctx, id, offset, chunkSize, reader, checksum)
 }
 
 func (s *Service) CompleteUpload(ctx context.Context, id string) (File, error) {

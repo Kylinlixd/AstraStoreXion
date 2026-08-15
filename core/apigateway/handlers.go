@@ -29,6 +29,14 @@ type fileService interface {
 	Capacity(context.Context) (files.Capacity, error)
 }
 
+type multipartService interface {
+	StartUpload(context.Context, files.MultipartStartInput) (files.UploadSession, error)
+	GetUpload(context.Context, string) (files.UploadSession, error)
+	AppendUpload(context.Context, string, int64, int64, io.Reader, string) (files.UploadSession, error)
+	CompleteUpload(context.Context, string) (files.File, error)
+	AbortUpload(context.Context, string) error
+}
+
 type gateway struct {
 	service        fileService
 	token          string
@@ -54,6 +62,14 @@ type apiErrorResponse struct {
 	Error apiError `json:"error"`
 }
 
+type uploadStartRequest struct {
+	Filename    string            `json:"filename"`
+	ContentType string            `json:"content_type"`
+	Size        int64             `json:"size"`
+	Checksum    string            `json:"checksum"`
+	Metadata    map[string]string `json:"metadata"`
+}
+
 func newRouter(g gateway) http.Handler {
 	router := mux.NewRouter()
 	router.HandleFunc("/health", g.health).Methods(http.MethodGet)
@@ -69,6 +85,14 @@ func newRouter(g gateway) http.Handler {
 	fileRouter.HandleFunc("/{id}/status", g.status).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.download).Methods(http.MethodGet)
 	fileRouter.HandleFunc("/{id}", g.delete).Methods(http.MethodDelete)
+
+	uploadRouter := router.PathPrefix("/api/v1/uploads").Subrouter()
+	uploadRouter.Use(g.authenticate)
+	uploadRouter.HandleFunc("", g.startUpload).Methods(http.MethodPost)
+	uploadRouter.HandleFunc("/{id}/complete", g.completeUpload).Methods(http.MethodPost)
+	uploadRouter.HandleFunc("/{id}", g.getUpload).Methods(http.MethodGet)
+	uploadRouter.HandleFunc("/{id}", g.appendUpload).Methods(http.MethodPut)
+	uploadRouter.HandleFunc("/{id}", g.abortUpload).Methods(http.MethodDelete)
 	return router
 }
 
@@ -245,6 +269,113 @@ func (g gateway) capacity(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, capacity)
 }
 
+func (g gateway) startUpload(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(multipartService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, 64<<10)
+	var payload uploadStartRequest
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_upload", "upload session must be valid JSON")
+		return
+	}
+	if payload.Size <= 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_upload", "size must be positive")
+		return
+	}
+	if payload.Size > g.maxUploadBytes {
+		writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+		return
+	}
+	session, err := service.StartUpload(request.Context(), files.MultipartStartInput{
+		Name: payload.Filename, ContentType: payload.ContentType, Size: payload.Size,
+		Checksum: payload.Checksum, Metadata: payload.Metadata,
+	})
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, session)
+}
+
+func (g gateway) getUpload(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(multipartService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	session, err := service.GetUpload(request.Context(), mux.Vars(request)["id"])
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, session)
+}
+
+func (g gateway) appendUpload(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(multipartService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	offset, end, total, err := parseContentRange(request.Header.Get("Content-Range"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_content_range", err.Error())
+		return
+	}
+	id := mux.Vars(request)["id"]
+	session, err := service.GetUpload(request.Context(), id)
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	if total != session.Size {
+		writeError(writer, http.StatusBadRequest, "invalid_content_range", "content range total does not match upload size")
+		return
+	}
+	chunkSize := end - offset + 1
+	if request.ContentLength != chunkSize {
+		writeError(writer, http.StatusBadRequest, "invalid_content_length", "content length must match content range")
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, chunkSize)
+	updated, err := service.AppendUpload(request.Context(), id, offset, chunkSize, request.Body, request.Header.Get("X-Chunk-Checksum"))
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, updated)
+}
+
+func (g gateway) completeUpload(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(multipartService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	file, err := service.CompleteUpload(request.Context(), mux.Vars(request)["id"])
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, file)
+}
+
+func (g gateway) abortUpload(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(multipartService)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	if err := service.AbortUpload(request.Context(), mux.Vars(request)["id"]); err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func (g gateway) delete(writer http.ResponseWriter, request *http.Request) {
 	if err := g.service.Delete(request.Context(), mux.Vars(request)["id"]); err != nil {
 		handleServiceError(writer, err)
@@ -281,6 +412,31 @@ func handleServiceError(writer http.ResponseWriter, err error) {
 	}
 }
 
+func handleUploadError(writer http.ResponseWriter, err error) {
+	var maxBytesError *http.MaxBytesError
+	switch {
+	case errors.As(err, &maxBytesError), errors.Is(err, files.ErrUploadTooLarge):
+		writeError(writer, http.StatusRequestEntityTooLarge, "file_too_large", errFileTooLarge.Error())
+	case errors.Is(err, files.ErrInvalidID), errors.Is(err, files.ErrInvalidUpload), errors.Is(err, files.ErrUploadChunkSize):
+		writeError(writer, http.StatusBadRequest, "invalid_upload", err.Error())
+	case errors.Is(err, files.ErrUploadNotFound):
+		writeError(writer, http.StatusNotFound, "upload_not_found", "upload session does not exist")
+	case errors.Is(err, files.ErrUploadOffsetConflict):
+		writeError(writer, http.StatusConflict, "upload_offset_conflict", err.Error())
+	case errors.Is(err, files.ErrUploadIncomplete):
+		writeError(writer, http.StatusConflict, "upload_incomplete", "upload session has not received all bytes")
+	case errors.Is(err, files.ErrUploadChecksumMismatch):
+		writeError(writer, http.StatusUnprocessableEntity, "upload_checksum_mismatch", "upload checksum does not match")
+	case errors.Is(err, files.ErrStoragePaused):
+		writeErrorWithRetry(writer, http.StatusInsufficientStorage, "storage_paused", "存储空间已达到安全阈值，暂时停止上传；释放空间后会自动恢复。", true)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeError(writer, http.StatusRequestTimeout, "request_timeout", "request was cancelled or timed out")
+	default:
+		log.Printf("resumable upload error: %v", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "upload operation failed")
+	}
+}
+
 func writeError(writer http.ResponseWriter, status int, code, message string) {
 	writeErrorWithRetry(writer, status, code, message, false)
 }
@@ -307,6 +463,28 @@ func queryInteger(request *http.Request, name string, defaultValue int) (int, er
 		return 0, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func parseContentRange(value string) (int64, int64, int64, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "bytes ") {
+		return 0, 0, 0, fmt.Errorf("content range must use bytes start-end/total")
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "bytes "), "/")
+	if len(parts) != 2 || parts[1] == "*" {
+		return 0, 0, 0, fmt.Errorf("content range must include a total size")
+	}
+	rangeParts := strings.Split(parts[0], "-")
+	if len(rangeParts) != 2 {
+		return 0, 0, 0, fmt.Errorf("content range must include start and end")
+	}
+	start, startErr := strconv.ParseInt(rangeParts[0], 10, 64)
+	end, endErr := strconv.ParseInt(rangeParts[1], 10, 64)
+	total, totalErr := strconv.ParseInt(parts[1], 10, 64)
+	if startErr != nil || endErr != nil || totalErr != nil || start < 0 || end < start || total <= end {
+		return 0, 0, 0, fmt.Errorf("content range values are invalid")
+	}
+	return start, end, total, nil
 }
 
 type uploadLimitReader struct {

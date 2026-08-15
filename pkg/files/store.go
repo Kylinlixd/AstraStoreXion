@@ -36,7 +36,7 @@ type Store interface {
 type MultipartStore interface {
 	StartUpload(context.Context, MultipartStartInput) (UploadSession, error)
 	GetUpload(context.Context, string) (UploadSession, error)
-	AppendUpload(context.Context, string, int64, io.Reader, string) (UploadSession, error)
+	AppendUpload(context.Context, string, int64, int64, io.Reader, string) (UploadSession, error)
 	CompleteUpload(context.Context, string) (File, error)
 	AbortUpload(context.Context, string) error
 }
@@ -248,11 +248,11 @@ func (s *DiskStore) GetUpload(ctx context.Context, id string) (UploadSession, er
 	return s.getUploadUnlocked(id)
 }
 
-func (s *DiskStore) AppendUpload(ctx context.Context, id string, offset int64, reader io.Reader, checksum string) (UploadSession, error) {
+func (s *DiskStore) AppendUpload(ctx context.Context, id string, offset, chunkSize int64, reader io.Reader, checksum string) (UploadSession, error) {
 	if err := validateUploadID(id); err != nil {
 		return UploadSession{}, err
 	}
-	if reader == nil || offset < 0 {
+	if reader == nil || offset < 0 || chunkSize <= 0 {
 		return UploadSession{}, fmt.Errorf("%w: upload chunk is invalid", ErrInvalidUpload)
 	}
 	if checksum != "" && !isSHA256(checksum) {
@@ -304,7 +304,10 @@ func (s *DiskStore) AppendUpload(ctx context.Context, id string, offset int64, r
 	if remaining < 0 {
 		return UploadSession{}, fmt.Errorf("%w: received bytes exceed declared size", ErrCorruptMetadata)
 	}
-	limited := io.LimitReader(&contextReader{ctx: ctx, reader: reader}, remaining+1)
+	if chunkSize > remaining {
+		return UploadSession{}, ErrUploadTooLarge
+	}
+	limited := io.LimitReader(&contextReader{ctx: ctx, reader: reader}, chunkSize+1)
 	written, copyErr := io.Copy(io.MultiWriter(part, hasher), limited)
 	rollback := func() {
 		if err := part.Truncate(initialSize); err != nil {
@@ -319,6 +322,10 @@ func (s *DiskStore) AppendUpload(ctx context.Context, id string, offset int64, r
 	if written > remaining {
 		rollback()
 		return UploadSession{}, ErrUploadTooLarge
+	}
+	if written != chunkSize {
+		rollback()
+		return UploadSession{}, ErrUploadChunkSize
 	}
 	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if checksum != "" && !strings.EqualFold(strings.TrimSpace(checksum), actualChecksum) {
