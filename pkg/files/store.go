@@ -47,41 +47,50 @@ type TrashStore interface {
 }
 
 type DiskStore struct {
-	root           string
-	objectsDir     string
-	metadataDir    string
-	tmpDir         string
-	uploadsDir     string
-	trashDir       string
-	pauseAtPercent int
-	statFS         func(string, *unix.Statfs_t) error
-	mu             sync.RWMutex
+	root            string
+	objectsDir      string
+	metadataDir     string
+	tmpDir          string
+	uploadsDir      string
+	trashDir        string
+	pauseAtPercent  int
+	ownerQuotaBytes int64
+	statFS          func(string, *unix.Statfs_t) error
+	mu              sync.RWMutex
 }
 
 func NewDiskStore(root string) (*DiskStore, error) {
-	return NewDiskStoreWithPause(root, 0)
+	return NewDiskStoreWithPauseAndQuota(root, 0, 0)
 }
 
 func NewDiskStoreWithPause(root string, pauseAtPercent int) (*DiskStore, error) {
+	return NewDiskStoreWithPauseAndQuota(root, pauseAtPercent, 0)
+}
+
+func NewDiskStoreWithPauseAndQuota(root string, pauseAtPercent int, ownerQuotaBytes int64) (*DiskStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("%w: data directory is empty", ErrInvalidUpload)
 	}
 	if pauseAtPercent < 0 || pauseAtPercent > 100 {
 		return nil, fmt.Errorf("%w: pause threshold must be between 0 and 100", ErrInvalidUpload)
 	}
+	if ownerQuotaBytes < 0 {
+		return nil, fmt.Errorf("%w: owner quota must not be negative", ErrInvalidUpload)
+	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve data directory: %w", err)
 	}
 	store := &DiskStore{
-		root:           absoluteRoot,
-		objectsDir:     filepath.Join(absoluteRoot, "objects"),
-		metadataDir:    filepath.Join(absoluteRoot, "metadata"),
-		tmpDir:         filepath.Join(absoluteRoot, "tmp"),
-		uploadsDir:     filepath.Join(absoluteRoot, "uploads"),
-		trashDir:       filepath.Join(absoluteRoot, "trash"),
-		pauseAtPercent: pauseAtPercent,
-		statFS:         unix.Statfs,
+		root:            absoluteRoot,
+		objectsDir:      filepath.Join(absoluteRoot, "objects"),
+		metadataDir:     filepath.Join(absoluteRoot, "metadata"),
+		tmpDir:          filepath.Join(absoluteRoot, "tmp"),
+		uploadsDir:      filepath.Join(absoluteRoot, "uploads"),
+		trashDir:        filepath.Join(absoluteRoot, "trash"),
+		pauseAtPercent:  pauseAtPercent,
+		ownerQuotaBytes: ownerQuotaBytes,
+		statFS:          unix.Statfs,
 	}
 	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir, store.uploadsDir, store.trashDir} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -144,6 +153,9 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 	}
 	if err := temporary.Close(); err != nil {
 		return File{}, fmt.Errorf("close object: %w", err)
+	}
+	if err := s.enforceQuotaUnlocked(ownerFromMetadata(input.Metadata), size); err != nil {
+		return File{}, err
 	}
 	if err := os.Rename(temporaryPath, objectPath); err != nil {
 		return File{}, fmt.Errorf("commit object: %w", err)
@@ -224,6 +236,9 @@ func (s *DiskStore) StartUpload(ctx context.Context, input MultipartStartInput) 
 	}
 	if paused {
 		return UploadSession{}, ErrStoragePaused
+	}
+	if err := s.enforceQuotaUnlocked(ownerFromMetadata(input.Metadata), input.Size); err != nil {
+		return UploadSession{}, err
 	}
 	if err := os.Mkdir(sessionDir, 0o750); err != nil {
 		return UploadSession{}, fmt.Errorf("create upload session: %w", err)
@@ -481,6 +496,117 @@ func (s *DiskStore) Capacity(ctx context.Context) (Capacity, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.capacityUnlocked()
+}
+
+func (s *DiskStore) Quota(ctx context.Context, owner string) (Quota, error) {
+	if err := ctx.Err(); err != nil {
+		return Quota{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	owner = normalizeOwner(owner)
+	used, err := s.ownerUsageUnlocked(owner)
+	if err != nil {
+		return Quota{}, err
+	}
+	limit := s.ownerQuotaBytes
+	available := int64(0)
+	if limit > used {
+		available = limit - used
+	}
+	usedPercent := 0.0
+	if limit > 0 {
+		usedPercent = float64(used) * 100 / float64(limit)
+	}
+	return Quota{Owner: owner, LimitBytes: limit, UsedBytes: used, AvailableBytes: available, UsedPercent: usedPercent}, nil
+}
+
+func (s *DiskStore) enforceQuotaUnlocked(owner string, incoming int64) error {
+	if s.ownerQuotaBytes == 0 {
+		return nil
+	}
+	if incoming < 0 {
+		return fmt.Errorf("%w: incoming size is negative", ErrInvalidUpload)
+	}
+	used, err := s.ownerUsageUnlocked(owner)
+	if err != nil {
+		return err
+	}
+	if used > s.ownerQuotaBytes || incoming > s.ownerQuotaBytes-used {
+		return fmt.Errorf("%w: owner %q has %d bytes used and %d bytes available", ErrQuotaExceeded, normalizeOwner(owner), used, maxInt64(0, s.ownerQuotaBytes-used))
+	}
+	return nil
+}
+
+func (s *DiskStore) ownerUsageUnlocked(owner string) (int64, error) {
+	owner = normalizeOwner(owner)
+	var total int64
+	add := func(size int64) error {
+		if size < 0 || total > int64(^uint64(0)>>1)-size {
+			return fmt.Errorf("%w: owner usage overflow", ErrCorruptMetadata)
+		}
+		total += size
+		return nil
+	}
+	metadata, err := os.ReadDir(s.metadataDir)
+	if err != nil {
+		return 0, fmt.Errorf("read metadata directory: %w", err)
+	}
+	for _, entry := range metadata {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validateID(id); err != nil {
+			return 0, fmt.Errorf("%w: unexpected manifest %s", ErrCorruptMetadata, entry.Name())
+		}
+		file, err := s.getUnlocked(id)
+		if err != nil {
+			return 0, err
+		}
+		if ownerFromMetadata(file.Metadata) == owner {
+			if err := add(file.Size); err != nil {
+				return 0, err
+			}
+		}
+	}
+	trash, err := os.ReadDir(s.trashDir)
+	if err != nil {
+		return 0, fmt.Errorf("read trash directory: %w", err)
+	}
+	for _, entry := range trash {
+		if !entry.IsDir() {
+			continue
+		}
+		file, err := s.getTrashUnlocked(entry.Name())
+		if err != nil {
+			return 0, err
+		}
+		if ownerFromMetadata(file.Metadata) == owner {
+			if err := add(file.Size); err != nil {
+				return 0, err
+			}
+		}
+	}
+	uploads, err := os.ReadDir(s.uploadsDir)
+	if err != nil {
+		return 0, fmt.Errorf("read upload directory: %w", err)
+	}
+	for _, entry := range uploads {
+		if !entry.IsDir() {
+			continue
+		}
+		session, err := s.getUploadUnlocked(entry.Name())
+		if err != nil {
+			return 0, err
+		}
+		if session.Status == UploadStatusUploading && ownerFromMetadata(session.Metadata) == owner {
+			if err := add(session.Size); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return total, nil
 }
 
 func (s *DiskStore) capacityUnlocked() (Capacity, error) {
@@ -1037,6 +1163,28 @@ func trashUsage(path string) (int, int64, error) {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func normalizeOwner(owner string) string {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return "_anonymous"
+	}
+	return owner
+}
+
+func ownerFromMetadata(metadata map[string]string) string {
+	if metadata == nil {
+		return "_anonymous"
+	}
+	return normalizeOwner(metadata["owner"])
 }
 
 func validateUploadID(id string) error {

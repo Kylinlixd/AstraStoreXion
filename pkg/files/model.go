@@ -20,6 +20,7 @@ var (
 	ErrUploadChunkSize        = errors.New("upload chunk size mismatch")
 	ErrRestoreConflict        = errors.New("file restore conflict")
 	ErrFileExists             = errors.New("file already exists")
+	ErrQuotaExceeded          = errors.New("owner quota exceeded")
 )
 
 const StatusAvailable = "available"
@@ -80,6 +81,14 @@ type Capacity struct {
 	TrashBytes     int64   `json:"trash_bytes"`
 	PauseAtPercent int     `json:"pause_at_percent"`
 	WritesPaused   bool    `json:"writes_paused"`
+}
+
+type Quota struct {
+	Owner          string  `json:"owner"`
+	LimitBytes     int64   `json:"limit_bytes"`
+	UsedBytes      int64   `json:"used_bytes"`
+	AvailableBytes int64   `json:"available_bytes"`
+	UsedPercent    float64 `json:"used_percent"`
 }
 
 func cloneFile(file File) File {

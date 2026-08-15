@@ -117,3 +117,13 @@ func (s *Service) Restore(ctx context.Context, id string) (File, error) {
 	}
 	return provider.Restore(ctx, id)
 }
+
+func (s *Service) Quota(ctx context.Context, owner string) (Quota, error) {
+	provider, ok := s.store.(interface {
+		Quota(context.Context, string) (Quota, error)
+	})
+	if !ok {
+		return Quota{}, fmt.Errorf("owner quota is unavailable")
+	}
+	return provider.Quota(ctx, owner)
+}
