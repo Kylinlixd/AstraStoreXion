@@ -6,7 +6,20 @@
 
 AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前生产可用形态为单节点：Go HTTP 服务负责文件字节、原始名称与 SHA-256，Django 负责公网认证和业务元数据，Vue 管理端提供上传进度和内置教程。
 
-## 当前能力
+<p align="center">
+  <a href="#features">✨ 当前能力</a> ·
+  <a href="#quick-start">🚀 快速开始</a> ·
+  <a href="#python-sdk">🐍 Python SDK</a> ·
+  <a href="#production">🛠️ 生产部署</a> ·
+  <a href="#test-assets">🧪 测试资料</a> ·
+  <a href="#verification">✅ 验证</a> ·
+  <a href="#limitations">⚠️ 限制</a> ·
+  <a href="#license">📄 License</a>
+</p>
+
+<a id="features"></a>
+
+## ✨ 当前能力
 
 - 原子上传：对象与 JSON manifest 分离落盘，失败自动补偿。
 - 重启持久化：服务重启后可继续查询和下载。
@@ -24,7 +37,9 @@ AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前�
 
 仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
 
-## 快速开始
+<a id="quick-start"></a>
+
+## 🚀 快速开始
 
 要求 Go 1.23+、Python 3.9+、curl。
 
@@ -48,7 +63,9 @@ XION_SERVICE_TOKEN="$XION_SERVICE_TOKEN" \
 ./scripts/smoke-test.sh test/fixtures/generated/upload-smoke.txt
 ```
 
-## Python SDK
+<a id="python-sdk"></a>
+
+## 🐍 Python SDK
 
 ```bash
 python -m pip install ./client/python
@@ -126,7 +143,7 @@ curl -sS -X POST "$API/api/v1/files/<file-id>/restore" \
 
 回收站目前没有公开永久删除接口，避免误操作；后续会增加带保留期和管理员确认的清理任务。
 
-### 可选主从异步复制
+### 🔁 可选主从异步复制
 
 复制默认关闭。需要副节点时，在主节点环境文件中设置：
 
@@ -147,7 +164,7 @@ curl -sS -X POST "$API/api/v1/replication/<job-id>/retry" \
 
 复制是异步的，不会回滚主节点写入；切换前应确认 `pending`、`running` 和 `failed` 任务已清空或已评估复制延迟。
 
-### 可恢复分片上传
+### 📦 可恢复分片上传
 
 1 GiB 大文件可以使用上传会话，网络中断后从 `received_bytes` 继续，不需要重新上传：
 
@@ -176,7 +193,9 @@ curl -sS -X POST "$API/api/v1/uploads/<upload_id>/complete" \
 
 分片必须连续提交，`Content-Length` 必须等于 `Content-Range` 的分片长度；服务会重新计算完整 SHA-256。旧的 `POST /api/v1/files` 单次上传接口仍然可用。中止未完成会话使用 `DELETE /api/v1/uploads/<upload_id>`。
 
-## 生产部署
+<a id="production"></a>
+
+## 🛠️ 生产部署
 
 生产服务只应监听 `127.0.0.1`，由 Django 代理业务文件操作。不要在 Nginx 暴露 8081，也不要把服务密钥交给浏览器。
 
@@ -185,7 +204,9 @@ curl -sS -X POST "$API/api/v1/uploads/<upload_id>/complete" \
 - 运维、备份、启用和回滚：[单节点运维手册](docs/operations/README.md)
 - 融合架构：[设计说明](docs/superpowers/specs/2026-08-09-blog-storage-integration-design.md)
 
-## 测试资料
+<a id="test-assets"></a>
+
+## 🧪 测试资料
 
 `make fixtures` 会生成可重复的 PNG、PDF、DOCX、TXT 与 checksum manifest。首次生成前安装专用依赖；它们不属于服务运行时依赖。PDF 和 Word 文件已按渲染结果做视觉验证，用于本地与生产上传/下载验收。
 
@@ -195,7 +216,9 @@ make fixtures
 ls -lh test/fixtures/generated
 ```
 
-## 验证
+<a id="verification"></a>
+
+## ✅ 验证
 
 ```bash
 go test ./... -count=1
@@ -204,10 +227,14 @@ go vet ./...
 python -m pytest client/python/tests -q
 ```
 
-## 限制
+<a id="limitations"></a>
+
+## ⚠️ 限制
 
 当前生产数据面仍为单节点；可恢复分片会话和回收站支持服务重启后继续，但尚未替代副本、自动故障转移或跨区域容灾。必须通过主机级备份保护 `/var/lib/astrastore-xion`。历史博客媒体本轮不迁移。
 
-## License
+<a id="license"></a>
+
+## 📄 License
 
 MIT
