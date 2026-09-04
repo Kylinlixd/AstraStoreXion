@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/astrastore-xion-logo.png" alt="AstraStoreXion logo" width="760">
+</p>
+
 # AstraStoreXion
 
 AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前生产可用形态为单节点：Go HTTP 服务负责文件字节、原始名称与 SHA-256，Django 负责公网认证和业务元数据，Vue 管理端提供上传进度和内置教程。
