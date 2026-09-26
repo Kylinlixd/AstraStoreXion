@@ -1,48 +1,77 @@
 # 生产部署与仓库的差异（2026-09-26 记录）
 
-修「文件管理页容量显示错误」时发现：**GitHub 上的 `main` 不是生产的真源。**
+修「文件管理页容量显示错误」时发现：**服务器 `/opt/blog_li` 的代码落后于 GitHub `main`。**
 
-## 观察到的事实
+## 结论（已修正）
 
-比对服务器 `/opt/blog_li` 与 `origin/main` 上所有非迁移、非测试的 Python 文件（各 66 个）：
+第一版报告写反了方向。当时用 `find` 收集文件时，服务器侧把 macOS 元数据垃圾
+（80 个 `._*.py`）也算了进去，我因此误判"服务器更新"。改用**语义比对**（对每个
+文件解析 AST 后比哈希，排除 `._*` 与 `__pycache__`）后结论明确：
 
 | 项 | 结果 |
 | --- | --- |
-| 仓库有、服务器无 | 0 个 |
-| 两边都有、内容不同 | 2 个 |
+| 两边共有的非迁移 Python 文件 | 66 个，**AST 完全一致** |
+| 差异文件 | 2 个，均为**服务器落后** |
+| 仓库缺失、仅服务器存在的文件 | 5 个真实文件 + `__init__.py` 扫描噪声 |
 
-两个差异文件：
+两个落后文件与修复：
 
-| 文件 | 差异 | 哪边更新 |
+| 文件 | 服务器（旧，有问题） | 仓库 `main`（新，正确） |
 | --- | --- | --- |
-| `apps/upload/views.py` | 服务器把 `validate_file_type` / `validate_file_size` 抽到了 `apps/upload/validation.py`，并使用 `apps/user/permissions.py` 的 `IsContentEditor`、`StorageCapacityReached` | **服务器更新**（这些模块在仓库里不存在） |
-| `apps/comment/serializers.py` | 内容不同 | 有一处改动部署了但没入库 |
+| `apps/upload/views.py` | `def get(self, request, pk)` 配 `public_token` 路由 → **必然 500** | `def get(self, request, token)` + `get_object_or_404(..., public_token=token)` |
+| `apps/comment/serializers.py` | 缺 `is_unread` 字段 | 含 `is_unread` + `get_is_unread` |
 
-服务器上另外多出的 80 个文件全部是 macOS 元数据垃圾（`._xxx.py`、`.___init__.py`），不是代码，可以随时清理。
+两个文件已从 `main` 恢复到服务器（部署前备份在
+`/var/backups/astrastore-xion/blog-li-*.py.<timestamp>`），公开文件预览从 500 恢复为 200。
 
-结论：生产代码是仓库 `main` 的**超集**，包含若干未提交的改动。`main` 直接部署到服务器会造成**功能降级**。
+## 那次 500 的成因
 
-## 这意味着什么
+`blog/urls.py` 把路由改成 token 形式后，视图签名没有同步跟上：
 
-- 「push 到 main 就是发布」目前对 `blog_li` **不成立**：服务器不是 git 仓库，代码是手工拷贝上去的。
-- 任何基于 `main` 的全量部署都会回退服务器上更新的代码。
-- 影响范围不只是这两个文件：缺失的 `validation.py`、`permissions.py` 说明还有配套模块只存在于服务器。
+```python
+# blog/urls.py:94
+path('api/files/public/<str:token>/', PublicFileDownloadView.as_view(), ...)
+
+# 服务器上的旧视图
+def get(self, request, pk):
+    file_obj = get_object_or_404(UploadFile, pk=pk, is_public=True)
+```
+
+Django 以 `token=` 关键字调用，视图只接受 `pk` → `TypeError` → 500。由于列表接口
+返回的 `file_url` 已指向该路由，**所有公开文件的缩略图、预览与下载都受影响**，
+不只是图片。数据库侧 `upload_file.public_token` 列存在且 20/20 有值，迁移
+`0006_move_public_file_links_to_api_files` 已应用，所以问题纯在代码版本。
+
+## 仍未收敛的部分
+
+**5 个文件只存在于服务器，仓库里没有**：
+
+```
+apps/category/admin.py
+apps/comment/admin.py
+apps/dashboard/admin.py
+apps/dashboard/models.py
+apps/dynamic/admin.py
+```
+
+它们是 Django admin 注册与一个 models 文件。目前不影响运行，但意味着**用 `main`
+全量重建服务器会丢掉它们**。建议从服务器取回并提交。
 
 ## 建议的收敛步骤
 
-1. **以服务器为准**，把缺的东西补回仓库（不要反过来）：
-   - 从服务器取回 `apps/upload/validation.py`、`apps/user/permissions.py`、`apps/comment/serializers.py`、`apps/upload/views.py`
-   - 与 `main` 做一次人工合并，确认没有把更新覆盖成旧版
-2. 在服务器上 `git init` + 关联远端，或把 `/opt/blog_li` 换成干净的 `git clone`，让「服务器代码」始终可追溯到某个 commit。
-3. 参照 AstraStoreXion 的做法加一条发布流水线（构建 → scp → 原子替换 → 健康检查 → 失败回滚），让 `blog_li` 也变成 push 即发布。
-4. 清理服务器上的 macOS 元数据垃圾：
+1. 把上面 5 个文件从服务器取回仓库并提交（以服务器为准，因为它们只在那里）。
+2. 在服务器上 `git init` + 关联远端，或把 `/opt/blog_li` 换成 `git clone`，让运行
+   代码始终可追溯到某个 commit。
+3. 给 `blog_li` 加发布流水线（构建 → scp → 原子替换 → 健康检查 → 失败回滚），
+   参照 AstraStoreXion 的 `.github/workflows/release.yml`。
+4. 清理服务器上的 macOS 垃圾：
 
    ```bash
    cd /opt/blog_li && find . -name '._*' -delete
    ```
 
-## 本次改动的落点
+## 本次相关改动的落点
 
-`GET /api/upload/files/summary/` 已加入 `main`（commit `057351d`），并且**已单独部署到服务器**（服务器版 `views.py` 也加上了同名方法，线上返回 `{"total": 21, "totalBytes": 36092030}`）。因此该接口与前端修复目前是生效的。
-
-但请注意：在上面的漂移收敛完成之前，**不要用 `main` 全量覆盖服务器代码**。
+- `GET /api/upload/files/summary/`：仓库 commit `057351d`，并已部署到服务器。
+- 前端容量显示：`myblog-admin` commit `d4b7935`，已通过流水线发布。
+- 公开文件预览 500：由本次恢复 `main` 版本代码修复，服务器上为手工部署。
