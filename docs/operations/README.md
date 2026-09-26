@@ -180,15 +180,63 @@ XION_SERVICE_TOKEN="$XION_SERVICE_TOKEN" \
 
 ## 备份与恢复
 
-数据目录结构包含 `objects/`、`metadata/`、`tmp/`、`uploads/`、`trash/` 和 `quarantine/`。一致备份应在停止写入或停止服务后进行：
+数据目录结构包含 `objects/`、`metadata/`、`tmp/`、`uploads/`、`trash/` 和 `quarantine/`。
+
+### 自动备份
+
+`deploy/backup/` 提供一套 systemd 单元，每天 04:30 备份数据库、历史 media 与 Xion 对象：
 
 ```bash
-sudo systemctl stop astrastore-xion
-sudo tar -C /var/lib -czf /var/backups/astrastore-xion-$(date +%Y%m%d-%H%M%S).tar.gz astrastore-xion
-sudo systemctl start astrastore-xion
+sudo install -o root -g root -m 0755 deploy/backup/astrastore-xion-backup.sh /usr/local/bin/astrastore-xion-backup
+sudo install -o root -g root -m 0644 deploy/backup/astrastore-xion-backup.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 deploy/backup/astrastore-xion-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now astrastore-xion-backup.timer
 ```
 
-恢复时先停止服务，将备份解压到原路径，确认所有者为 `astrastore-xion:astrastore-xion` 和目录 mode 0700，再启动并执行 `/readyz` 与 fixture 下载校验。
+脚本在打包 Xion 目录之前会**停止 astrastore-xion**，无论成功失败都由 `trap` 恢复服务。原因是一次普通备份可能同时读到某个对象的旧 manifest 和新字节；单次写入的原子性并不保证目录整体一致。归档后用 `sha256sum` 记录校验和并试读 tar，确认不是半个文件。
+
+```bash
+sudo systemctl start astrastore-xion-backup.service   # 手动跑一次
+sudo systemctl list-timers astrastore-xion-backup.timer
+sudo journalctl -u astrastore-xion-backup --since '1 day ago'
+sudo systemctl --failed                              # 失败会进入 failed 状态，必须能看到
+```
+
+保留期默认 7 天（`BACKUP_RETENTION_DAYS`）。产物位于 `/root/backups`：`blog-YYYY-MM-DD.sql.gz`、`xion-YYYY-MM-DD.tar.gz` 及其 `.sha256`、`media/` 增量副本。
+
+> **同盘风险。** 默认 `/root/backups` 与数据目录都在同一块盘上，只能防误删和一致性损坏，**不能防磁盘故障或整机丢失**。生产上必须把 `/root/backups` 再同步到异地，例如：
+>
+> ```bash
+> rsync -a --delete /root/backups/ user@offsite-host:/backups/$(hostname)/
+> ```
+>
+> 这一步没有内置进脚本，因为异地目标与凭据取决于你的环境；如果长期不做，等于只有半套备份。
+
+### 恢复演练
+
+备份的唯一价值是能恢复，所以恢复步骤必须实测过。下面是可重复的演练流程，**不会碰线上数据目录**：
+
+```bash
+drill="$(mktemp -d)"
+tar -xzf /root/backups/xion-YYYY-MM-DD.tar.gz -C "$drill"
+sha256sum -c /root/backups/xion-YYYY-MM-DD.tar.gz.sha256
+
+# 用备份数据起一个临时实例，验证它能自行通过一致性自检
+XION_SERVICE_TOKEN=drill XION_DATA_DIR="$drill/astrastore-xion" \
+  XION_LISTEN_ADDR=127.0.0.1:18099 /usr/local/bin/astrastore-xion &
+curl -fsS http://127.0.0.1:18099/readyz
+
+# 逐个比对 manifest 记录的 checksum 与实际字节
+for m in "$drill"/astrastore-xion/metadata/*.json; do
+  id="$(basename "$m" .json)"
+  want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["checksum"])' "$m")"
+  got="$(sha256sum "$drill/astrastore-xion/objects/$id" | awk '{print $1}')"
+  [ "$want" = "$got" ] || echo "MISMATCH: $id"
+done
+```
+
+真正的恢复：停止服务 → 把数据目录整体替换为备份内容 → 确认属主为 `astrastore-xion:astrastore-xion`、目录 mode 0700 → 启动服务 → 执行 `/readyz` 与 fixture 下载校验。**先保留旧目录**，确认新数据可用后再删除。
 
 ## 回滚
 

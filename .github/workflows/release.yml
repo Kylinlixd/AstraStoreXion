@@ -41,6 +41,9 @@ jobs:
           cp bin/linux-amd64/xionctl .release-package/
           cp deploy/systemd/astrastore-xion.service .release-package/
           cp deploy/systemd/astrastore-xion.env.example .release-package/
+          cp deploy/backup/astrastore-xion-backup.sh .release-package/
+          cp deploy/backup/astrastore-xion-backup.service .release-package/
+          cp deploy/backup/astrastore-xion-backup.timer .release-package/
           tar -czf release.tgz -C .release-package .
           ls -l release.tgz
 
@@ -95,10 +98,25 @@ jobs:
             install -o root -g root -m 0755 "$staging/xionctl" /usr/local/bin/xionctl
 
             # 单元文件与仓库保持一致，再 reload 让 systemd 重新读取。
+            units_changed=0
             if ! cmp -s "$staging/astrastore-xion.service" /etc/systemd/system/astrastore-xion.service; then
               install -o root -g root -m 0644 "$staging/astrastore-xion.service" /etc/systemd/system/astrastore-xion.service
+              units_changed=1
+            fi
+
+            # 备份脚本与定时器随发布一起同步。备份工具曾经因为脚本缺少执行位
+            # 静默失败数周，所以这里每次发布都校验权限与单元内容。
+            install -o root -g root -m 0755 "$staging/astrastore-xion-backup.sh" /usr/local/bin/astrastore-xion-backup
+            for unit in astrastore-xion-backup.service astrastore-xion-backup.timer; do
+              if ! cmp -s "$staging/$unit" "/etc/systemd/system/$unit"; then
+                install -o root -g root -m 0644 "$staging/$unit" "/etc/systemd/system/$unit"
+                units_changed=1
+              fi
+            done
+            if [ "$units_changed" -eq 1 ]; then
               systemctl daemon-reload
             fi
+            systemctl enable --now astrastore-xion-backup.timer >/dev/null 2>&1 || true
 
             systemctl restart astrastore-xion
 

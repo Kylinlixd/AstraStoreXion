@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily backup of Kylin Blog data and AstraStoreXion objects
+
+[Timer]
+# 04:30 是服务器低峰；Persistent=true 让宕机错过的备份在启动后补跑。
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

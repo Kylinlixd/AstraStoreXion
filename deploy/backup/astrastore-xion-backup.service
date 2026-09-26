@@ -1,0 +1,18 @@
+[Unit]
+Description=Back up Kylin Blog database, media and AstraStoreXion objects
+After=mysql.service
+
+[Service]
+Type=oneshot
+# root 是刻意的：需要读取 /opt/blog_li/.env 的数据库口令、停止/启动
+# astrastore-xion，并保持备份文件对 astrastore-xion 系统用户不可读。
+User=root
+ExecStart=/usr/local/bin/astrastore-xion-backup
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+
+# 备份失败必须可见：这个单元曾经因为脚本缺少执行位而静默失败了数周。
+# 这里让它进入 failed 状态（systemctl --failed 能直接看到），并留下 journal。
+SuccessExitStatus=0
+Restart=no
