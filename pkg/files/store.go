@@ -886,6 +886,8 @@ func (s *DiskStore) capacityUnlocked() (Capacity, error) {
 	if err := s.ensureUsageLocked(); err != nil {
 		return Capacity{}, err
 	}
+	// The threshold applies to the whole filesystem, not to the data directory:
+	// other tenants on the same volume can pause uploads, and that is intended.
 	paused := s.pauseAtPercent > 0 && usedPercent >= float64(s.pauseAtPercent)
 	return Capacity{
 		TotalBytes: total, UsedBytes: used, AvailableBytes: available,
