@@ -32,6 +32,10 @@ type Config struct {
 	Client        *http.Client
 	MaxAttempts   int
 	RetryInterval time.Duration
+	// BackoffBase and BackoffMax bound the exponential delay between retries of
+	// a failed job. Defaults: 5s and 10m.
+	BackoffBase time.Duration
+	BackoffMax  time.Duration
 }
 
 type Operation string
@@ -60,6 +64,10 @@ type Job struct {
 	LastError string    `json:"last_error,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// NextAttemptAt gates retries with exponential backoff. A failed job whose
+	// backoff has not elapsed yet is skipped instead of being retried in a hot
+	// loop that burns every attempt within seconds.
+	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
 }
 
 type Status struct {
@@ -78,6 +86,9 @@ type Manager struct {
 	client        *http.Client
 	maxAttempts   int
 	retryInterval time.Duration
+	backoffBase   time.Duration
+	backoffMax    time.Duration
+	now           func() time.Time
 
 	mu   sync.Mutex
 	jobs map[string]Job
@@ -109,9 +120,23 @@ func NewManager(source Source, config Config) (*Manager, error) {
 	if err := os.MkdirAll(config.JobsDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create replication jobs directory: %w", err)
 	}
+	// Zero selects the production default. A negative value disables backoff,
+	// which tests use to drive several attempts in one ProcessPending call.
+	backoffBase := config.BackoffBase
+	if backoffBase == 0 {
+		backoffBase = 5 * time.Second
+	}
+	backoffMax := config.BackoffMax
+	if backoffMax <= 0 {
+		backoffMax = 10 * time.Minute
+	}
+	if backoffMax < backoffBase {
+		backoffMax = backoffBase
+	}
 	manager := &Manager{
 		source: source, remoteURL: remoteURL, token: config.Token, jobsDir: config.JobsDir,
 		client: config.Client, maxAttempts: maxAttempts, retryInterval: retryInterval,
+		backoffBase: backoffBase, backoffMax: backoffMax, now: func() time.Time { return time.Now().UTC() },
 		jobs: make(map[string]Job), wake: make(chan struct{}, 1),
 	}
 	if manager.client == nil {
@@ -174,7 +199,8 @@ func (m *Manager) enqueue(ctx context.Context, operation Operation, fileID strin
 			existing.Status = JobPending
 			existing.Attempts = 0
 			existing.LastError = ""
-			existing.UpdatedAt = time.Now().UTC()
+			existing.NextAttemptAt = time.Time{}
+			existing.UpdatedAt = m.now()
 			if err := m.persistJob(existing); err != nil {
 				return Job{}, err
 			}
@@ -183,11 +209,13 @@ func (m *Manager) enqueue(ctx context.Context, operation Operation, fileID strin
 		}
 		return existing, nil
 	}
-	now := time.Now().UTC()
+	now := m.now()
 	job := Job{ID: jobID, Operation: operation, FileID: fileID, Status: JobPending, CreatedAt: now, UpdatedAt: now}
 	if err := m.persistJob(job); err != nil {
 		return Job{}, err
 	}
+	// Publish before signalling so the worker never looks for a job that is not
+	// visible yet.
 	m.jobs[jobID] = job
 	m.signal()
 	return job, nil
@@ -217,6 +245,7 @@ func (m *Manager) Retry(ctx context.Context, jobID string) error {
 		job.Status = JobPending
 		job.Attempts = 0
 		job.LastError = ""
+		job.NextAttemptAt = time.Time{}
 		job.UpdatedAt = time.Now().UTC()
 		if err := m.persistJob(job); err != nil {
 			return err
@@ -270,6 +299,7 @@ func (m *Manager) ProcessPending(ctx context.Context) error {
 		current.Status = JobFailed
 		current.Attempts++
 		current.LastError = trimError(err)
+		current.NextAttemptAt = m.now().Add(m.backoffFor(current.Attempts))
 	} else {
 		current.Status = JobCompleted
 		current.LastError = ""
@@ -285,12 +315,18 @@ func (m *Manager) ProcessPending(ctx context.Context) error {
 func (m *Manager) claimNext() (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := m.now()
 	for _, job := range m.jobs {
 		if (job.Status != JobPending && job.Status != JobFailed) || job.Attempts >= m.maxAttempts {
 			continue
 		}
+		// Wait out the backoff window instead of hammering a failing replica.
+		// A zero backoff base means retries are immediate.
+		if m.backoffBase > 0 && !job.NextAttemptAt.IsZero() && now.Before(job.NextAttemptAt) {
+			continue
+		}
 		job.Status = JobRunning
-		job.UpdatedAt = time.Now().UTC()
+		job.UpdatedAt = now
 		m.jobs[job.ID] = job
 		if err := m.persistJob(job); err != nil {
 			return Job{}, false, err
@@ -298,6 +334,24 @@ func (m *Manager) claimNext() (Job, bool, error) {
 		return job, true, nil
 	}
 	return Job{}, false, nil
+}
+
+// backoffFor returns the delay before attempt number `attempts` may run again.
+func (m *Manager) backoffFor(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := m.backoffBase
+	for index := 1; index < attempts; index++ {
+		delay *= 2
+		if delay >= m.backoffMax {
+			return m.backoffMax
+		}
+	}
+	if delay > m.backoffMax {
+		return m.backoffMax
+	}
+	return delay
 }
 
 func (m *Manager) execute(ctx context.Context, job Job) error {

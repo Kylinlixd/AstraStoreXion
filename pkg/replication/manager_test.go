@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
 	"github.com/stretchr/testify/assert"
@@ -107,7 +108,7 @@ func TestReplicationReloadsJobsAndRetriesFailures(t *testing.T) {
 	defer server.Close()
 
 	jobsDir := t.TempDir()
-	config := Config{RemoteURL: server.URL, Token: "secret", JobsDir: jobsDir, MaxAttempts: 3}
+	config := Config{RemoteURL: server.URL, Token: "secret", JobsDir: jobsDir, MaxAttempts: 3, BackoffBase: -1}
 	first, err := NewManager(fakeSource{file: files.File{ID: "file-2", Name: "two.txt", Size: 3}, body: "two"}, config)
 	require.NoError(t, err)
 	_, err = first.EnqueueUpload(context.Background(), "file-2")
@@ -192,4 +193,45 @@ func TestReplicationConfigRejectsMissingRemote(t *testing.T) {
 	_, err := NewManager(fakeSource{}, Config{JobsDir: t.TempDir()})
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, ErrInvalidConfig))
+}
+
+// TestReplicationFailureSchedulesBackoff pins the fix for the retry storm: a
+// failed job must not be claimable again until its backoff window elapses.
+func TestReplicationFailureSchedulesBackoff(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		attempts.Add(1)
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	manager, err := NewManager(fakeSource{file: files.File{ID: "file-9", Name: "nine.txt", Size: 4}, body: "nine"}, Config{
+		RemoteURL: server.URL, Token: "secret", JobsDir: t.TempDir(), MaxAttempts: 5,
+		BackoffBase: time.Hour, BackoffMax: time.Hour,
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+
+	_, err = manager.EnqueueUpload(context.Background(), "file-9")
+	require.NoError(t, err)
+	require.Error(t, manager.ProcessPending(context.Background()))
+	assert.Equal(t, int32(1), attempts.Load())
+
+	job := manager.List()[0]
+	assert.Equal(t, JobFailed, job.Status)
+	assert.False(t, job.NextAttemptAt.IsZero(), "a failed job records when it may run again")
+	assert.WithinDuration(t, time.Now().UTC().Add(time.Hour), job.NextAttemptAt, time.Minute)
+
+	// The window has not elapsed, so no further attempt is made.
+	require.NoError(t, manager.ProcessPending(context.Background()))
+	assert.Equal(t, int32(1), attempts.Load(), "retry must wait for the backoff window")
+
+	// A manual retry clears the window and runs immediately.
+	require.NoError(t, manager.Retry(context.Background(), job.ID))
+	require.Error(t, manager.ProcessPending(context.Background()))
+	assert.Equal(t, int32(2), attempts.Load())
 }
