@@ -16,6 +16,8 @@
 #   BLOG_ENV_FILE         默认 /opt/blog_li/.env
 #   BLOG_MEDIA_DIR        默认 /opt/blog_li/media
 #   XION_SERVICE          默认 astrastore-xion
+#   OFFSITE_DIR           异地副本目录（如已挂载的 NAS 路径）；未设置时脚本会
+#                         明确警告，因为同盘备份无法防磁盘故障
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-/root/backups}"
@@ -118,6 +120,23 @@ log "pruning backups older than ${RETENTION_DAYS} days"
 find "$BACKUP_DIR" -maxdepth 1 -name 'blog-*.sql.gz' -mtime +"$RETENTION_DAYS" -delete
 find "$BACKUP_DIR" -maxdepth 1 -name 'xion-*.tar.gz' -mtime +"$RETENTION_DAYS" -delete
 find "$BACKUP_DIR" -maxdepth 1 -name 'xion-*.tar.gz.sha256' -mtime +"$RETENTION_DAYS" -delete
+
+# ---------------------------------------------------------------------------
+# 5. 异地副本检查
+# ---------------------------------------------------------------------------
+# 备份与数据在同一块盘上时，只能防误删和一致性损坏。这里显式报告是否已经
+# 存在异地副本，避免"以为有备份"却从未离开本机。
+if [ -n "${OFFSITE_DIR:-}" ]; then
+  if [ -d "$OFFSITE_DIR" ]; then
+    log "syncing to offsite ${OFFSITE_DIR}"
+    rsync -a --delete "$BACKUP_DIR/" "$OFFSITE_DIR/"
+    date -Is > "$OFFSITE_DIR/.last-offsite-sync"
+  else
+    log "WARNING: OFFSITE_DIR=${OFFSITE_DIR} does not exist; offsite copy skipped"
+  fi
+else
+  log "WARNING: no OFFSITE_DIR configured; backups exist only on this host"
+fi
 
 ELAPSED=$(( $(date +%s) - STARTED_AT ))
 log "backup finished in ${ELAPSED}s"
