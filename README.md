@@ -250,3 +250,7 @@ python -m pytest client/python/tests -q
 ## 📄 License
 
 MIT
+
+## 自动发布
+
+推送到 `main` 触发 `.github/workflows/release.yml`：构建并测试 → 打包 → scp 到服务器 `/tmp` → SSH 原子安装并重启 → 轮询 `/readyz`，失败自动回滚到上一版二进制。所需仓库 secret 与 `myblog-admin` 相同：`SERVER_HOST`、`SERVER_USERNAME`、`SERVER_SSH_KEY`。
