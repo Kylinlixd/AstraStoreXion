@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 )
 
 type Service struct {
@@ -28,6 +29,17 @@ func (s *Service) Status(ctx context.Context, id string) (File, error) {
 
 func (s *Service) List(ctx context.Context, limit, offset int) ([]File, error) {
 	return s.store.List(ctx, limit, offset)
+}
+
+// Count returns the number of active objects.
+func (s *Service) Count(ctx context.Context) (int, error) {
+	provider, ok := s.store.(interface {
+		Count(context.Context) (int, error)
+	})
+	if !ok {
+		return 0, fmt.Errorf("object count is unavailable")
+	}
+	return provider.Count(ctx)
 }
 
 func (s *Service) Delete(ctx context.Context, id string) error {
@@ -126,4 +138,49 @@ func (s *Service) Quota(ctx context.Context, owner string) (Quota, error) {
 		return Quota{}, fmt.Errorf("owner quota is unavailable")
 	}
 	return provider.Quota(ctx, owner)
+}
+
+// Recover repairs crash leftovers so a restarted process can become ready
+// without manual filesystem surgery.
+func (s *Service) Recover(ctx context.Context) (RecoveryReport, error) {
+	provider, ok := s.store.(interface {
+		Recover(context.Context) (RecoveryReport, error)
+	})
+	if !ok {
+		return RecoveryReport{}, nil
+	}
+	return provider.Recover(ctx)
+}
+
+// SweepUploads expires abandoned resumable upload sessions.
+func (s *Service) SweepUploads(ctx context.Context) (int, error) {
+	provider, ok := s.store.(interface {
+		SweepUploads(context.Context) (int, error)
+	})
+	if !ok {
+		return 0, nil
+	}
+	return provider.SweepUploads(ctx)
+}
+
+// ListUploads lists persisted resumable upload sessions.
+func (s *Service) ListUploads(ctx context.Context) ([]UploadSession, error) {
+	provider, ok := s.store.(interface {
+		ListUploads(context.Context) ([]UploadSession, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("resumable uploads are unavailable")
+	}
+	return provider.ListUploads(ctx)
+}
+
+// PurgeTrash permanently removes trash entries deleted at or before olderThan.
+func (s *Service) PurgeTrash(ctx context.Context, olderThan time.Time) (int, error) {
+	provider, ok := s.store.(interface {
+		PurgeTrash(context.Context, time.Time) (int, error)
+	})
+	if !ok {
+		return 0, fmt.Errorf("trash is unavailable")
+	}
+	return provider.PurgeTrash(ctx, olderThan)
 }

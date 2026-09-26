@@ -9,19 +9,19 @@ import (
 type StorageNode interface {
 	// 写入数据块
 	WriteChunk(ctx context.Context, chunkID string, data []byte) error
-	
+
 	// 读取数据块
 	ReadChunk(ctx context.Context, chunkID string) ([]byte, error)
-	
+
 	// 删除数据块
 	DeleteChunk(ctx context.Context, chunkID string) error
-	
+
 	// 获取节点状态
 	GetStatus(ctx context.Context) (*NodeStatus, error)
-	
+
 	// 开始心跳检测
 	StartHeartbeat(ctx context.Context) error
-	
+
 	// 停止心跳检测
 	StopHeartbeat() error
 }
@@ -58,4 +58,4 @@ type ChunkWriter interface {
 	ChunkID() string
 	Commit() error
 	Abort() error
-} 
+}

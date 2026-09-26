@@ -95,10 +95,10 @@ func cloneFile(file File) File {
 	if file.Metadata == nil {
 		return file
 	}
-	source := file.Metadata
-	file.Metadata = make(map[string]string, len(source))
-	for key, value := range source {
-		file.Metadata[key] = value
+	cloned := make(map[string]string, len(file.Metadata))
+	for key, value := range file.Metadata {
+		cloned[key] = value
 	}
+	file.Metadata = cloned
 	return file
 }

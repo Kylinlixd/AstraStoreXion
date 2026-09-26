@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"os"
 	"path/filepath"
@@ -46,6 +47,26 @@ type TrashStore interface {
 	Restore(context.Context, string) (File, error)
 }
 
+// Options carries the optional DiskStore behaviours. The zero value keeps the
+// original single-node defaults: no pause threshold, no owner quota and no
+// background expiry of abandoned upload sessions.
+type Options struct {
+	PauseAtPercent  int
+	OwnerQuotaBytes int64
+	// UploadTTL expires upload sessions that stopped receiving bytes. Zero
+	// disables expiry.
+	UploadTTL time.Duration
+	// clock is injectable so expiry can be tested without sleeping.
+	clock func() time.Time
+}
+
+func (o Options) now() time.Time {
+	if o.clock != nil {
+		return o.clock()
+	}
+	return time.Now().UTC()
+}
+
 type DiskStore struct {
 	root            string
 	objectsDir      string
@@ -53,21 +74,130 @@ type DiskStore struct {
 	tmpDir          string
 	uploadsDir      string
 	trashDir        string
+	quarantineDir   string
 	pauseAtPercent  int
 	ownerQuotaBytes int64
+	uploadTTL       time.Duration
+	clock           func() time.Time
 	statFS          func(string, *unix.Statfs_t) error
 	mu              sync.RWMutex
+	// Per-owner byte accounting, split by record type so a reservation can
+	// migrate to a real object without being double counted. The index is
+	// rebuilt from disk on first use and updated incrementally afterwards.
+	usage      usageIndex
+	usageValid bool
+	load       sync.Once
+	loadErr    error
 }
 
+// usageIndex tracks the three things that occupy an owner's quota. Keeping the
+// categories separate makes the transitions exact: completing an upload moves
+// bytes from uploads to files; deleting moves them from files to trash;
+// restoring moves them back; purging drops trash bytes entirely.
+type usageIndex struct {
+	files   map[string]int64
+	trash   map[string]int64
+	uploads map[string]int64
+}
+
+func newUsageIndex() usageIndex {
+	return usageIndex{
+		files:   make(map[string]int64),
+		trash:   make(map[string]int64),
+		uploads: make(map[string]int64),
+	}
+}
+
+func (u usageIndex) total(owner string) int64 {
+	return u.files[owner] + u.trash[owner] + u.uploads[owner]
+}
+
+func (u usageIndex) activeCount() int {
+	return len(u.files)
+}
+
+func (u usageIndex) bytesOf() int64 {
+	var total int64
+	for _, size := range u.files {
+		total += size
+	}
+	return total
+}
+
+func (u usageIndex) trashedCount() int {
+	return len(u.trash)
+}
+
+func (u usageIndex) bytesInTrash() int64 {
+	var total int64
+	for _, size := range u.trash {
+		total += size
+	}
+	return total
+}
+
+// usage returns the byte slice for one category, creating it when needed.
+func (u usageIndex) bucket(kind usageKind) map[string]int64 {
+	switch kind {
+	case usageTrash:
+		return u.trash
+	case usageUpload:
+		return u.uploads
+	default:
+		return u.files
+	}
+}
+
+type usageKind int
+
+const (
+	usageFile usageKind = iota
+	usageTrash
+	usageUpload
+)
+
 func NewDiskStore(root string) (*DiskStore, error) {
-	return NewDiskStoreWithPauseAndQuota(root, 0, 0)
+	return NewDiskStoreWithOptions(root, Options{})
 }
 
 func NewDiskStoreWithPause(root string, pauseAtPercent int) (*DiskStore, error) {
-	return NewDiskStoreWithPauseAndQuota(root, pauseAtPercent, 0)
+	return NewDiskStoreWithOptions(root, Options{PauseAtPercent: pauseAtPercent})
 }
 
 func NewDiskStoreWithPauseAndQuota(root string, pauseAtPercent int, ownerQuotaBytes int64) (*DiskStore, error) {
+	return NewDiskStoreWithOptions(root, Options{PauseAtPercent: pauseAtPercent, OwnerQuotaBytes: ownerQuotaBytes})
+}
+
+// SetUploadTTL configures expiry of abandoned upload sessions. Zero disables it.
+func (s *DiskStore) SetUploadTTL(ttl time.Duration) {
+	if ttl < 0 {
+		ttl = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploadTTL = ttl
+}
+
+// SetClock replaces the time source. Intended for tests.
+func (s *DiskStore) SetClock(clock func() time.Time) {
+	if clock == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = clock
+}
+
+func (s *DiskStore) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now().UTC()
+}
+
+func NewDiskStoreWithOptions(root string, options Options) (*DiskStore, error) {
+	pauseAtPercent := options.PauseAtPercent
+	ownerQuotaBytes := options.OwnerQuotaBytes
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("%w: data directory is empty", ErrInvalidUpload)
 	}
@@ -88,11 +218,14 @@ func NewDiskStoreWithPauseAndQuota(root string, pauseAtPercent int, ownerQuotaBy
 		tmpDir:          filepath.Join(absoluteRoot, "tmp"),
 		uploadsDir:      filepath.Join(absoluteRoot, "uploads"),
 		trashDir:        filepath.Join(absoluteRoot, "trash"),
+		quarantineDir:   filepath.Join(absoluteRoot, "quarantine"),
 		pauseAtPercent:  pauseAtPercent,
 		ownerQuotaBytes: ownerQuotaBytes,
+		uploadTTL:       options.UploadTTL,
+		clock:           options.clock,
 		statFS:          unix.Statfs,
 	}
-	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir, store.uploadsDir, store.trashDir} {
+	for _, directory := range []string{store.root, store.objectsDir, store.metadataDir, store.tmpDir, store.uploadsDir, store.trashDir, store.quarantineDir} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return nil, fmt.Errorf("create storage directory %s: %w", directory, err)
 		}
@@ -117,6 +250,7 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 	temporaryPath := filepath.Join(s.tmpDir, fileID+".part")
 	objectPath := filepath.Join(s.objectsDir, fileID)
 	manifestPath := filepath.Join(s.metadataDir, fileID+".json")
+	owner := ownerFromMetadata(input.Metadata)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,6 +260,9 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 	}
 	if paused {
 		return File{}, ErrStoragePaused
+	}
+	if err := s.ensureUsageLocked(); err != nil {
+		return File{}, err
 	}
 	if pathExists(objectPath) || pathExists(manifestPath) || pathExists(filepath.Join(s.trashDir, fileID)) {
 		return File{}, ErrFileExists
@@ -154,7 +291,7 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 	if err := temporary.Close(); err != nil {
 		return File{}, fmt.Errorf("close object: %w", err)
 	}
-	if err := s.enforceQuotaUnlocked(ownerFromMetadata(input.Metadata), size); err != nil {
+	if err := s.enforceQuotaUnlocked(owner, size); err != nil {
 		return File{}, err
 	}
 	if err := os.Rename(temporaryPath, objectPath); err != nil {
@@ -181,7 +318,7 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 		Size:        size,
 		Checksum:    hex.EncodeToString(hasher.Sum(nil)),
 		Status:      StatusAvailable,
-		CreatedAt:   time.Now().UTC(),
+		CreatedAt:   s.now(),
 		Metadata:    cloneFile(File{Metadata: input.Metadata}).Metadata,
 	}
 	if err := writeManifest(manifestPath, stored); err != nil {
@@ -196,6 +333,7 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 		_ = syncDirectory(s.objectsDir)
 		return File{}, fmt.Errorf("sync metadata directory: %w", err)
 	}
+	s.moveUsage(owner, usageKind(-1), usageFile, size)
 	return cloneFile(stored), nil
 }
 
@@ -214,7 +352,7 @@ func (s *DiskStore) StartUpload(ctx context.Context, input MultipartStartInput) 
 	sessionDir := filepath.Join(s.uploadsDir, sessionID)
 	dataPath := filepath.Join(sessionDir, "data.part")
 	manifestPath := filepath.Join(sessionDir, "manifest.json")
-	now := time.Now().UTC()
+	now := s.now()
 	session := UploadSession{
 		ID: sessionID, Name: cleanDisplayName(input.Name), ContentType: strings.TrimSpace(input.ContentType),
 		Size: input.Size, Checksum: strings.ToLower(strings.TrimSpace(input.Checksum)),
@@ -236,6 +374,14 @@ func (s *DiskStore) StartUpload(ctx context.Context, input MultipartStartInput) 
 	}
 	if paused {
 		return UploadSession{}, ErrStoragePaused
+	}
+	// Expire abandoned sessions before reserving quota, so a stalled client
+	// cannot hold capacity indefinitely.
+	if _, err := s.sweepUploadsUnlocked(s.now()); err != nil {
+		return UploadSession{}, err
+	}
+	if err := s.ensureUsageLocked(); err != nil {
+		return UploadSession{}, err
 	}
 	if err := s.enforceQuotaUnlocked(ownerFromMetadata(input.Metadata), input.Size); err != nil {
 		return UploadSession{}, err
@@ -262,6 +408,7 @@ func (s *DiskStore) StartUpload(ctx context.Context, input MultipartStartInput) 
 	if err := syncDirectory(sessionDir); err != nil {
 		return UploadSession{}, fmt.Errorf("sync upload session: %w", err)
 	}
+	s.moveUsage(ownerFromMetadata(session.Metadata), usageKind(-1), usageUpload, session.Size)
 	removeSession = false
 	return cloneUploadSession(session), nil
 }
@@ -367,7 +514,7 @@ func (s *DiskStore) AppendUpload(ctx context.Context, id string, offset, chunkSi
 		return UploadSession{}, fmt.Errorf("sync upload part: %w", err)
 	}
 	session.ReceivedBytes += written
-	session.UpdatedAt = time.Now().UTC()
+	session.UpdatedAt = s.now()
 	manifestPath := filepath.Join(s.uploadsDir, id, "manifest.json")
 	if err := writeUploadManifest(manifestPath, session); err != nil {
 		rollback()
@@ -452,13 +599,16 @@ func (s *DiskStore) CompleteUpload(ctx context.Context, id string) (File, error)
 	}
 	session.FileID = fileID
 	session.Status = UploadStatusCompleted
-	session.UpdatedAt = time.Now().UTC()
+	session.UpdatedAt = s.now()
 	if err := writeUploadManifest(filepath.Join(s.uploadsDir, id, "manifest.json"), session); err != nil {
 		return File{}, err
 	}
 	if err := syncDirectory(filepath.Join(s.uploadsDir, id)); err != nil {
 		return File{}, fmt.Errorf("sync upload session: %w", err)
 	}
+	// The reservation becomes a real object: migrate the bytes instead of
+	// charging them a second time.
+	s.moveUsage(ownerFromMetadata(session.Metadata), usageUpload, usageFile, session.Size)
 	removeObject = false
 	_ = os.Remove(dataPath)
 	return cloneFile(stored), nil
@@ -486,7 +636,12 @@ func (s *DiskStore) AbortUpload(ctx context.Context, id string) error {
 	if err := os.RemoveAll(filepath.Join(s.uploadsDir, id)); err != nil {
 		return fmt.Errorf("remove upload session: %w", err)
 	}
-	return syncDirectory(s.uploadsDir)
+	if err := syncDirectory(s.uploadsDir); err != nil {
+		return err
+	}
+	// Release the quota reservation held by the abandoned session.
+	s.releaseUsage(ownerFromMetadata(session.Metadata), usageUpload, session.Size)
+	return nil
 }
 
 func (s *DiskStore) Capacity(ctx context.Context) (Capacity, error) {
@@ -505,7 +660,7 @@ func (s *DiskStore) Quota(ctx context.Context, owner string) (Quota, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	owner = normalizeOwner(owner)
-	used, err := s.ownerUsageUnlocked(owner)
+	used, err := s.ownerUsageLocked(owner)
 	if err != nil {
 		return Quota{}, err
 	}
@@ -528,7 +683,7 @@ func (s *DiskStore) enforceQuotaUnlocked(owner string, incoming int64) error {
 	if incoming < 0 {
 		return fmt.Errorf("%w: incoming size is negative", ErrInvalidUpload)
 	}
-	used, err := s.ownerUsageUnlocked(owner)
+	used, err := s.ownerUsageLocked(owner)
 	if err != nil {
 		return err
 	}
@@ -538,75 +693,145 @@ func (s *DiskStore) enforceQuotaUnlocked(owner string, incoming int64) error {
 	return nil
 }
 
-func (s *DiskStore) ownerUsageUnlocked(owner string) (int64, error) {
-	owner = normalizeOwner(owner)
-	var total int64
-	add := func(size int64) error {
-		if size < 0 || total > int64(^uint64(0)>>1)-size {
+// ensureUsageLocked loads the per-owner usage index once per store instance.
+// Every mutation updates the index incrementally, so uploads no longer rescan
+// every manifest on the hot path. Callers must hold s.mu.
+func (s *DiskStore) ensureUsageLocked() error {
+	s.load.Do(func() {
+		s.loadErr = s.rebuildUsageLocked()
+	})
+	return s.loadErr
+}
+
+// RebuildUsage discards the cached accounting and rescans the store. Run it if
+// files are changed outside the service, for example by restore tooling.
+func (s *DiskStore) RebuildUsage(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rebuildUsageLocked()
+}
+
+func (s *DiskStore) rebuildUsageLocked() error {
+	dataFiles, err := os.ReadDir(s.metadataDir)
+	if err != nil {
+		return fmt.Errorf("read metadata directory: %w", err)
+	}
+	trashEntries, err := os.ReadDir(s.trashDir)
+	if err != nil {
+		return fmt.Errorf("read trash directory: %w", err)
+	}
+	uploadEntries, err := os.ReadDir(s.uploadsDir)
+	if err != nil {
+		return fmt.Errorf("read upload directory: %w", err)
+	}
+
+	index := newUsageIndex()
+	add := func(kind usageKind, owner string, size int64) error {
+		if size < 0 {
+			return fmt.Errorf("%w: negative object size", ErrCorruptMetadata)
+		}
+		owner = normalizeOwner(owner)
+		bucket := index.bucket(kind)
+		current := bucket[owner]
+		if current > math.MaxInt64-size {
 			return fmt.Errorf("%w: owner usage overflow", ErrCorruptMetadata)
 		}
-		total += size
+		bucket[owner] = current + size
 		return nil
 	}
-	metadata, err := os.ReadDir(s.metadataDir)
-	if err != nil {
-		return 0, fmt.Errorf("read metadata directory: %w", err)
-	}
-	for _, entry := range metadata {
+
+	for _, entry := range dataFiles {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		if err := validateID(id); err != nil {
-			return 0, fmt.Errorf("%w: unexpected manifest %s", ErrCorruptMetadata, entry.Name())
+			return fmt.Errorf("%w: unexpected manifest %s", ErrCorruptMetadata, entry.Name())
 		}
 		file, err := s.getUnlocked(id)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if ownerFromMetadata(file.Metadata) == owner {
-			if err := add(file.Size); err != nil {
-				return 0, err
-			}
+		if err := add(usageFile, ownerFromMetadata(file.Metadata), file.Size); err != nil {
+			return err
 		}
 	}
-	trash, err := os.ReadDir(s.trashDir)
-	if err != nil {
-		return 0, fmt.Errorf("read trash directory: %w", err)
-	}
-	for _, entry := range trash {
+	for _, entry := range trashEntries {
 		if !entry.IsDir() {
 			continue
 		}
 		file, err := s.getTrashUnlocked(entry.Name())
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if ownerFromMetadata(file.Metadata) == owner {
-			if err := add(file.Size); err != nil {
-				return 0, err
-			}
+		if err := add(usageTrash, ownerFromMetadata(file.Metadata), file.Size); err != nil {
+			return err
 		}
 	}
-	uploads, err := os.ReadDir(s.uploadsDir)
-	if err != nil {
-		return 0, fmt.Errorf("read upload directory: %w", err)
-	}
-	for _, entry := range uploads {
+	for _, entry := range uploadEntries {
 		if !entry.IsDir() {
 			continue
 		}
 		session, err := s.getUploadUnlocked(entry.Name())
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if session.Status == UploadStatusUploading && ownerFromMetadata(session.Metadata) == owner {
-			if err := add(session.Size); err != nil {
-				return 0, err
-			}
+		if session.Status != UploadStatusUploading {
+			continue
+		}
+		// Reserve the declared size, not the received bytes: otherwise a
+		// client could declare 1 GiB, never finish, and hold the quota for free.
+		if err := add(usageUpload, ownerFromMetadata(session.Metadata), session.Size); err != nil {
+			return err
 		}
 	}
-	return total, nil
+	s.usage = index
+	s.usageValid = true
+	return nil
+}
+
+func (s *DiskStore) ownerUsageLocked(owner string) (int64, error) {
+	if err := s.ensureUsageLocked(); err != nil {
+		return 0, err
+	}
+	return s.usage.total(normalizeOwner(owner)), nil
+}
+
+// moveUsage transfers bytes between categories for one owner. It is the only
+// mutation primitive, which keeps the three categories consistent: bytes never
+// appear twice and never disappear silently.
+func (s *DiskStore) moveUsage(owner string, from, to usageKind, size int64) {
+	if !s.usageValid || size <= 0 {
+		return
+	}
+	owner = normalizeOwner(owner)
+	if from >= 0 {
+		source := s.usage.bucket(from)
+		source[owner] -= size
+		if source[owner] <= 0 {
+			delete(source, owner)
+		}
+	}
+	if to >= 0 {
+		s.usage.bucket(to)[owner] += size
+	}
+}
+
+// releaseUsage drops bytes from a category entirely.
+func (s *DiskStore) releaseUsage(owner string, kind usageKind, size int64) {
+	s.moveUsage(owner, kind, usageKind(-1), size)
+}
+
+// ownerUsageUnlocked walks the store and returns the quota usage for one owner.
+// It remains the authoritative slow path behind RebuildUsage.
+func (s *DiskStore) ownerUsageUnlocked(owner string) (int64, error) {
+	if err := s.rebuildUsageLocked(); err != nil {
+		return 0, err
+	}
+	return s.usage.total(normalizeOwner(owner)), nil
 }
 
 func (s *DiskStore) capacityUnlocked() (Capacity, error) {
@@ -625,23 +850,17 @@ func (s *DiskStore) capacityUnlocked() (Capacity, error) {
 	if total > 0 {
 		usedPercent = float64(used) * 100 / float64(total)
 	}
-	objectCount, objectBytes, err := directoryUsage(s.objectsDir)
-	if err != nil {
-		return Capacity{}, err
-	}
-	metadataCount, _, err := directoryUsage(s.metadataDir)
-	if err != nil {
-		return Capacity{}, err
-	}
-	trashCount, trashBytes, err := trashUsage(s.trashDir)
-	if err != nil {
+	// Object and trash statistics come from the accounting index instead of two
+	// extra directory walks, so a capacity probe no longer scales with the
+	// number of stored objects.
+	if err := s.ensureUsageLocked(); err != nil {
 		return Capacity{}, err
 	}
 	paused := s.pauseAtPercent > 0 && usedPercent >= float64(s.pauseAtPercent)
 	return Capacity{
 		TotalBytes: total, UsedBytes: used, AvailableBytes: available,
-		UsedPercent: usedPercent, ObjectCount: objectCount, ObjectBytes: objectBytes,
-		MetadataCount: metadataCount, TrashCount: trashCount, TrashBytes: trashBytes,
+		UsedPercent: usedPercent, ObjectCount: s.usage.activeCount(), ObjectBytes: s.usage.bytesOf(),
+		MetadataCount: s.usage.activeCount(), TrashCount: s.usage.trashedCount(), TrashBytes: s.usage.bytesInTrash(),
 		PauseAtPercent: s.pauseAtPercent, WritesPaused: paused,
 	}, nil
 }
@@ -655,27 +874,6 @@ func (s *DiskStore) writesPausedUnlocked() (bool, error) {
 		return false, err
 	}
 	return capacity.WritesPaused, nil
-}
-
-func directoryUsage(path string) (int, int64, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read storage directory: %w", err)
-	}
-	count := 0
-	var total int64
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return 0, 0, fmt.Errorf("stat storage entry: %w", err)
-		}
-		count++
-		total += info.Size()
-	}
-	return count, total, nil
 }
 
 func (s *DiskStore) Open(ctx context.Context, id string) (File, io.ReadCloser, error) {
@@ -731,6 +929,30 @@ func (s *DiskStore) getUnlocked(id string) (File, error) {
 		return File{}, fmt.Errorf("%w: %s", ErrCorruptMetadata, id)
 	}
 	return cloneFile(stored), nil
+}
+
+// Count returns the number of active objects without loading their manifests.
+func (s *DiskStore) Count(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries, err := os.ReadDir(s.metadataDir)
+	if err != nil {
+		return 0, fmt.Errorf("list metadata: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		if validateID(strings.TrimSuffix(entry.Name(), ".json")) != nil {
+			return 0, fmt.Errorf("%w: unexpected manifest %s", ErrCorruptMetadata, entry.Name())
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (s *DiskStore) List(ctx context.Context, limit, offset int) ([]File, error) {
@@ -847,7 +1069,7 @@ func (s *DiskStore) Delete(ctx context.Context, id string) error {
 	if err := json.Unmarshal(data, &stored); err != nil || stored.ID != id {
 		return fmt.Errorf("%w: invalid trashed metadata %s", ErrCorruptMetadata, id)
 	}
-	deletedAt := time.Now().UTC()
+	deletedAt := s.now()
 	stored.DeletedAt = &deletedAt
 	if err := writeManifest(trashManifestPath, stored); err != nil {
 		return err
@@ -856,7 +1078,13 @@ func (s *DiskStore) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("sync trash entry: %w", err)
 	}
 	rollbackObject = false
-	return syncDirectory(s.trashDir)
+	if err := syncDirectory(s.trashDir); err != nil {
+		return fmt.Errorf("sync trash directory: %w", err)
+	}
+	// Trashed bytes still count against the owner, so move them between
+	// categories rather than releasing them.
+	s.moveUsage(ownerFromMetadata(stored.Metadata), usageFile, usageTrash, stored.Size)
+	return nil
 }
 
 func (s *DiskStore) ListTrash(ctx context.Context, limit, offset int) ([]File, error) {
@@ -965,6 +1193,8 @@ func (s *DiskStore) Restore(ctx context.Context, id string) (File, error) {
 		return File{}, fmt.Errorf("sync trash directory: %w", err)
 	}
 	rollbackObject = false
+	// The bytes leave the trash bucket and rejoin the active objects.
+	s.moveUsage(ownerFromMetadata(file.Metadata), usageTrash, usageFile, file.Size)
 	return cloneFile(file), nil
 }
 
@@ -1089,12 +1319,36 @@ func (s *DiskStore) Ready(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.readyQuarantineUnlocked(); err != nil {
+		return err
+	}
 	partials, err := os.ReadDir(s.tmpDir)
 	if err != nil {
 		return fmt.Errorf("read temporary directory: %w", err)
 	}
 	if len(partials) > 0 {
 		return fmt.Errorf("%w: unexpected temporary artifact %s", ErrCorruptMetadata, partials[0].Name())
+	}
+	return nil
+}
+
+// readyQuarantineUnlocked validates the quarantine area. Recover moves crash
+// leftovers there instead of deleting them, so the directory must stay
+// trustworthy: only the known groups, and only entries inside them.
+func (s *DiskStore) readyQuarantineUnlocked() error {
+	groups, err := os.ReadDir(s.quarantineDir)
+	if err != nil {
+		return fmt.Errorf("read quarantine directory: %w", err)
+	}
+	for _, group := range groups {
+		if !group.IsDir() {
+			return fmt.Errorf("%w: unexpected quarantine artifact %s", ErrCorruptMetadata, group.Name())
+		}
+		switch group.Name() {
+		case "partials", "metadata", "uploads":
+		default:
+			return fmt.Errorf("%w: unexpected quarantine group %s", ErrCorruptMetadata, group.Name())
+		}
 	}
 	return nil
 }
@@ -1134,30 +1388,6 @@ func (s *DiskStore) getTrashUnlocked(id string) (File, error) {
 		return File{}, fmt.Errorf("%w: trash object %s has unexpected size", ErrCorruptMetadata, id)
 	}
 	return cloneFile(stored), nil
-}
-
-func trashUsage(path string) (int, int64, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read trash directory: %w", err)
-	}
-	count := 0
-	var total int64
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			return 0, 0, fmt.Errorf("%w: unexpected trash artifact %s", ErrCorruptMetadata, entry.Name())
-		}
-		info, err := os.Stat(filepath.Join(path, entry.Name(), "object"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return 0, 0, fmt.Errorf("stat trash object: %w", err)
-		}
-		count++
-		total += info.Size()
-	}
-	return count, total, nil
 }
 
 func pathExists(path string) bool {
@@ -1263,10 +1493,11 @@ func cloneUploadSession(session UploadSession) UploadSession {
 	if session.Metadata == nil {
 		return session
 	}
-	session.Metadata = make(map[string]string, len(session.Metadata))
+	cloned := make(map[string]string, len(session.Metadata))
 	for key, value := range session.Metadata {
-		session.Metadata[key] = value
+		cloned[key] = value
 	}
+	session.Metadata = cloned
 	return session
 }
 

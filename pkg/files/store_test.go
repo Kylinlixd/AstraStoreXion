@@ -219,7 +219,7 @@ func TestDiskStoreReadyRejectsIncompleteTrashArtifacts(t *testing.T) {
 }
 
 func TestDiskStorePausesWritesAtConfiguredCapacity(t *testing.T) {
-	store, err := NewDiskStoreWithPause(t.TempDir(), 90)
+	store, err := NewDiskStoreWithOptions(t.TempDir(), Options{PauseAtPercent: 90})
 	require.NoError(t, err)
 	store.statFS = func(_ string, stat *unix.Statfs_t) error {
 		stat.Blocks = 100
@@ -237,7 +237,7 @@ func TestDiskStorePausesWritesAtConfiguredCapacity(t *testing.T) {
 }
 
 func TestDiskStoreDeleteAllowsAutomaticRecoveryAfterPause(t *testing.T) {
-	store, err := NewDiskStoreWithPause(t.TempDir(), 90)
+	store, err := NewDiskStoreWithOptions(t.TempDir(), Options{PauseAtPercent: 90})
 	require.NoError(t, err)
 	full := false
 	store.statFS = func(_ string, stat *unix.Statfs_t) error {
