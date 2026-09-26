@@ -34,6 +34,10 @@ AstraStoreXion 是一个面向自托管博客的持久化文件服务。当前�
 - 容量保护：按文件系统使用率自动暂停新上传，空间释放后自动恢复；`xionctl capacity` 可查看容量和暂停状态。
 - 按用户配额：可按 `metadata.owner` 设置独立逻辑上限，活动文件、回收站和未完成分片预留都会计入；超额上传返回 HTTP 507。
 - 博客双存储：新文件走 Xion，历史 `/media/` 保持可用。
+- 崩溃自愈：启动时把残留临时文件移入 `quarantine/`，不需要人工进目录清理才能就绪。
+- 配额回收：未完成分片会话按 `XION_UPLOAD_SESSION_TTL` 自动过期；`xionctl uploads purge` 可手动触发。
+- 回收站出口：`xionctl trash purge --older-than 720h --yes` 永久删除并释放空间。
+- 版本可查：发布二进制注入版本与 commit，`xionctl version` 显示线上构建。
 
 仓库中的 Raft、元数据服务、存储节点和其他语言客户端仍属于实验性扩展，不是本轮博客部署的生产依赖。
 
@@ -103,6 +107,12 @@ xionctl list
 xionctl info <file-id>
 xionctl download <file-id> /tmp/file.bin
 xionctl delete <file-id> --yes
+xionctl uploads list
+xionctl uploads purge
+xionctl trash list --limit 100
+xionctl trash restore <file-id>
+xionctl trash purge --older-than 720h --yes
+xionctl version
 xionctl logs --lines 100
 xionctl logs --since 1h
 xionctl logs --follow
@@ -110,7 +120,7 @@ xionctl logs --follow
 
 `xionctl` 默认读取 `/etc/astrastore-xion.env`，不会直接修改 `/var/lib/astrastore-xion`；删除必须显式带 `--yes`。
 
-生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`。`xionctl capacity` 使用类似 Linux `df -h` 的表格显示总容量、已用、可用、使用率和上传状态。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
+生产环境默认 `XION_STORAGE_PAUSE_AT_PERCENT=90`，并建议设置 `XION_UPLOAD_SESSION_TTL=24h`。`xionctl capacity` 使用类似 Linux `df -h` 的表格显示总容量、已用、可用、使用率和上传状态。达到阈值时上传接口返回 HTTP 507 和 `storage_paused`，客户端会提示“存储空间已达到安全阈值，暂时停止上传”；读取、下载和删除仍可用，删除文件释放空间后下一次上传自动恢复，无需重启。
 
 如需给博客或其他租户设置逻辑配额，在服务环境文件中配置字节数（`0` 表示关闭）：
 
@@ -226,6 +236,8 @@ go test ./... -race -count=1
 go vet ./...
 python -m pytest client/python/tests -q
 ```
+
+同一组命令由 `.github/workflows/ci.yml` 在每次 push 和 pull request 上执行，含 `gofmt` 检查与 `make release-linux` 构建。
 
 <a id="limitations"></a>
 

@@ -15,8 +15,8 @@
 在已验证源码上构建 Linux 二进制：
 
 ```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-  go build -trimpath -ldflags='-s -w' -o bin/astrastore-xion ./core/apigateway
+make release-linux
+ls -l bin/linux-amd64
 ```
 
 服务器上创建用户并安装：
@@ -90,6 +90,55 @@ xionctl config --max-upload-size 100M
 
 `logs` 只读取固定单元 `astrastore-xion.service` 的 journal。默认最近 100 行；`--since 1h` 查看最近一小时，`--follow` 持续跟踪。它不经过 shell，不允许指定其他 systemd 服务，也不会改变 Xion 运行状态。
 
+## 存储修复与容量回收
+
+### 启动自愈
+
+服务启动时会先执行一次修复，把崩溃残留的临时文件移入 `quarantine/`（对象字节不会被删除，只是离开活动目录），然后才接受流量。这一步解决了"进程在写 manifest 与改名之间被杀、`/readyz` 永久报错"的问题：
+
+```bash
+journalctl -u astrastore-xion --since '10 min ago' | grep recovered
+# recovered storage: partial_objects=1 metadata_manifests=2 ...
+```
+
+`quarantine/` 只允许 `partials/`、`metadata/`、`uploads/` 三个子目录，出现其他内容时 `/readyz` 会重新报警，避免"把问题藏起来"。确认无用后可人工清理：
+
+```bash
+sudo ls -R /var/lib/astrastore-xion/quarantine
+sudo rm -rf /var/lib/astrastore-xion/quarantine/*
+```
+
+### 清理未完成的分片会话
+
+分片会话按声明的完整大小占用 owner 配额。客户端中断后如果不清理，配额会被一直占住，因此服务按 `XION_UPLOAD_SESSION_TTL` 自动过期（模板默认 `24h`），也可以手动触发：
+
+```bash
+xionctl uploads list
+xionctl uploads purge
+```
+
+### 回收站出口
+
+普通删除只把对象移入回收站，不释放空间。回收站不会自动清理，需要显式操作：
+
+```bash
+xionctl trash list --limit 100
+xionctl trash restore <file-id>
+xionctl trash purge --older-than 720h --yes
+xionctl trash purge --all --yes
+```
+
+`--older-than` 接受 Go duration（`24h`、`720h`），也接受 RFC3339 时间戳。永久删除必须提供 `--yes`，且必须给出 `--older-than` 或 `--all`，避免"无参数清空回收站"这类误操作。
+
+### 版本核对
+
+发布二进制注入版本与 commit，出问题时先确认线上到底是哪一次构建：
+
+```bash
+xionctl version
+# xionctl v0.4.0 (a1b2c3d)
+```
+
 ## 博客启用顺序
 
 1. 备份 MySQL、`/opt/blog_li` 代码、`.env` 和当前前端 release 指向。
@@ -131,7 +180,7 @@ XION_SERVICE_TOKEN="$XION_SERVICE_TOKEN" \
 
 ## 备份与恢复
 
-数据目录结构包含 `objects/`、`metadata/` 和 `tmp/`。一致备份应在停止写入或停止服务后进行：
+数据目录结构包含 `objects/`、`metadata/`、`tmp/`、`uploads/`、`trash/` 和 `quarantine/`。一致备份应在停止写入或停止服务后进行：
 
 ```bash
 sudo systemctl stop astrastore-xion
@@ -163,7 +212,7 @@ df -h /var/lib/astrastore-xion
 xionctl capacity
 ```
 
-告警优先级：就绪失败、磁盘使用率超过 80%、博客上传持续 5xx、对象目录和元数据目录数量长期不一致。
+告警优先级：就绪失败、磁盘使用率超过 80%、博客上传持续 5xx、对象目录和元数据目录数量长期不一致。容量与数量统计直接读自服务内存索引，不再依赖逐目录扫描；`xionctl capacity` 的 `object_count` 与实际对象数不一致时，说明有人绕过服务改动过数据目录，需要重启服务或调用重建。
 
 ## 已知限制
 

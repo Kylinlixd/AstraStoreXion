@@ -1,3 +1,4 @@
+import hashlib
 import io
 import unittest
 from unittest.mock import Mock, patch
@@ -5,8 +6,10 @@ from unittest.mock import Mock, patch
 import requests
 
 from astrastore_xion import (
+    XionChecksumError,
     XionClient,
     XionConfig,
+    XionError,
     XionHTTPError,
     XionUnavailableError,
 )
@@ -132,3 +135,138 @@ class XionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SESSION_PAYLOAD = {
+    "upload_id": "11111111-2222-3333-4444-555555555555",
+    "filename": "big.bin",
+    "content_type": "application/octet-stream",
+    "size": 8,
+    "received_bytes": 0,
+    "status": "uploading",
+    "created_at": "2026-09-25T00:00:00Z",
+    "updated_at": "2026-09-25T00:00:00Z",
+    "metadata": {"owner": "blog"},
+}
+
+
+class ResumableUploadTests(unittest.TestCase):
+    def make_client(self, session, chunk_size=4):
+        session.headers = {}
+        session.close = Mock()
+        patcher = patch("astrastore_xion.client.requests.Session", return_value=session)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        return XionClient(XionConfig(
+            api_gateway="http://xion",
+            service_token="secret",
+            max_retries=0,
+            retry_interval=0,
+            chunk_size=chunk_size,
+        ))
+
+    def test_upload_large_file_uses_resumable_sessions(self):
+        session = Mock()
+        session.request.side_effect = [
+            response(201, SESSION_PAYLOAD),
+            response(200, dict(SESSION_PAYLOAD, received_bytes=4)),
+            response(200, dict(SESSION_PAYLOAD, received_bytes=8)),
+            response(201, FILE_PAYLOAD),
+        ]
+        client = self.make_client(session)
+        progress = []
+        stored = client.upload_large_file(
+            io.BytesIO(b"abcdefgh"),
+            "big.bin",
+            metadata={"owner": "blog"},
+            progress=lambda done, total: progress.append((done, total)),
+        )
+
+        assert stored.file_id == FILE_PAYLOAD["file_id"]
+        assert progress == [(4, 8), (8, 8)]
+
+        calls = session.request.call_args_list
+        assert calls[0].args[0] == "POST"
+        assert calls[0].args[1].endswith("/api/v1/uploads")
+        assert calls[0].kwargs["json"]["size"] == 8
+        assert calls[0].kwargs["json"]["metadata"] == {"owner": "blog"}
+
+        assert calls[1].args[1].endswith("/api/v1/uploads/" + SESSION_PAYLOAD["upload_id"])
+        assert calls[1].kwargs["headers"]["Content-Range"] == "bytes 0-3/8"
+        assert calls[1].kwargs["data"] == b"abcd"
+        assert calls[1].kwargs["headers"]["X-Chunk-Checksum"] == hashlib.sha256(b"abcd").hexdigest()
+        assert calls[2].kwargs["headers"]["Content-Range"] == "bytes 4-7/8"
+
+        assert calls[3].args[1].endswith("/complete")
+
+    def test_upload_large_file_aborts_session_on_failure(self):
+        session = Mock()
+        session.request.side_effect = [
+            response(201, SESSION_PAYLOAD),
+            response(409, {"error": {"code": "upload_offset_conflict", "message": "bad"}}),
+            response(204),
+        ]
+        client = self.make_client(session)
+
+        with self.assertRaises(XionHTTPError):
+            client.upload_large_file(io.BytesIO(b"abcdefgh"), "big.bin")
+
+        assert session.request.call_args_list[-1].args[0] == "DELETE"
+
+    def test_upload_large_file_rejects_unseekable_source(self):
+        client = self.make_client(Mock())
+
+        class Unseekable:
+            def read(self, size):
+                return b""
+
+        with self.assertRaises(XionError):
+            client.upload_large_file(Unseekable(), "stream.bin")
+
+
+class DownloadChecksumTests(unittest.TestCase):
+    def make_client(self, session):
+        session.headers = {}
+        session.close = Mock()
+        patcher = patch("astrastore_xion.client.requests.Session", return_value=session)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        return XionClient(XionConfig(
+            api_gateway="http://xion",
+            service_token="secret",
+            max_retries=0,
+            retry_interval=0,
+        ))
+
+    def test_download_verifies_checksum_when_requested(self):
+        body = b"hello"
+        session = Mock()
+        result = response(200, chunks=[body])
+        result.headers = {"ETag": '"sha256-' + hashlib.sha256(body).hexdigest() + '"'}
+        session.request.return_value = result
+        client = self.make_client(session)
+
+        output = io.BytesIO()
+        client.download_file(FILE_PAYLOAD["file_id"], output, verify_checksum=True)
+        assert output.getvalue() == body
+
+    def test_download_rejects_mismatched_checksum(self):
+        session = Mock()
+        result = response(200, chunks=[b"tampered"])
+        result.headers = {"ETag": '"sha256-' + hashlib.sha256(b"original").hexdigest() + '"'}
+        session.request.return_value = result
+        client = self.make_client(session)
+
+        with self.assertRaises(XionChecksumError):
+            client.download_file(FILE_PAYLOAD["file_id"], io.BytesIO(), verify_checksum=True)
+
+    def test_download_without_verification_stays_lenient(self):
+        session = Mock()
+        result = response(200, chunks=[b"anything"])
+        result.headers = {}
+        session.request.return_value = result
+        client = self.make_client(session)
+
+        output = io.BytesIO()
+        client.download_file(FILE_PAYLOAD["file_id"], output)
+        assert output.getvalue() == b"anything"

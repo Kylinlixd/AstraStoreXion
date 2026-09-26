@@ -1,6 +1,7 @@
 """AstraStoreXion Python client."""
 
 from .client import (
+    XionChecksumError,
     XionClient,
     XionError,
     XionHTTPError,
@@ -13,9 +14,10 @@ from .models import (
     FileResponse,
     FileStatusResponse,
     UploadFileResponse,
+    UploadSessionResponse,
 )
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 __all__ = [
     "DeleteFileResponse",
@@ -23,6 +25,8 @@ __all__ = [
     "FileResponse",
     "FileStatusResponse",
     "UploadFileResponse",
+    "UploadSessionResponse",
+    "XionChecksumError",
     "XionClient",
     "XionConfig",
     "XionError",

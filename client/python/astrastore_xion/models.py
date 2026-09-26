@@ -48,3 +48,34 @@ class FileListResponse:
 class DeleteFileResponse:
     success: bool
     message: str = ""
+
+
+@dataclass(frozen=True)
+class UploadSessionResponse:
+    upload_id: str
+    filename: str
+    content_type: str
+    size: int
+    received_bytes: int
+    status: str
+    created_at: str
+    updated_at: str
+    checksum: str = ""
+    file_id: str = ""
+    metadata: Dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "UploadSessionResponse":
+        return cls(
+            upload_id=str(data.get("upload_id", "")),
+            filename=str(data.get("filename", "")),
+            content_type=str(data.get("content_type", "application/octet-stream")),
+            size=int(data.get("size", 0)),
+            received_bytes=int(data.get("received_bytes", 0)),
+            status=str(data.get("status", "uploading")),
+            created_at=str(data.get("created_at", "")),
+            updated_at=str(data.get("updated_at", "")),
+            checksum=str(data.get("checksum", "")),
+            file_id=str(data.get("file_id", "")),
+            metadata=dict(data.get("metadata") or {}),
+        )
