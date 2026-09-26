@@ -85,22 +85,28 @@ func run(ctx context.Context) error {
 			recovery.UploadSessions, recovery.ExpiredUploads, recovery.ExpiredTrash)
 	}
 
-	var replicator *replication.Manager
+	// Declared as the interface, not as *replication.Manager: a typed nil pointer
+	// stored in an interface compares unequal to nil, so the gateway's
+	// `replicator == nil` guard would not fire and uploads would panic whenever
+	// replication is disabled (the default single-node deployment).
+	var replicator replicationEnqueuer
+	var manager *replication.Manager
 	if replicaURL := strings.TrimSpace(os.Getenv("XION_REPLICA_URL")); replicaURL != "" {
 		maxAttempts, parseErr := envInt("XION_REPLICATION_MAX_ATTEMPTS", 10)
 		if parseErr != nil || maxAttempts < 1 {
 			return fmt.Errorf("XION_REPLICATION_MAX_ATTEMPTS must be a positive integer")
 		}
 		jobsDir := envOrDefault("XION_REPLICATION_DIR", filepath.Join(dataDirectory, "replication"))
-		replicator, err = replication.NewManager(service, replication.Config{
+		manager, err = replication.NewManager(service, replication.Config{
 			RemoteURL: replicaURL, Token: os.Getenv("XION_REPLICA_TOKEN"),
 			JobsDir: jobsDir, MaxAttempts: maxAttempts,
 		})
 		if err != nil {
 			return fmt.Errorf("initialize replication: %w", err)
 		}
-		replicator.Start()
-		defer replicator.Close()
+		manager.Start()
+		defer manager.Close()
+		replicator = manager
 		log.Printf("Xion replication enabled: %s", replicaURL)
 	}
 	address := envOrDefault("XION_LISTEN_ADDR", "127.0.0.1:8081")

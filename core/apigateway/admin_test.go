@@ -163,3 +163,41 @@ func TestRestoreKeepsOriginalFileID(t *testing.T) {
 	assert.Equal(t, http.StatusOK, downloadResponse.Code)
 	assert.Equal(t, "keep", downloadResponse.Body.String())
 }
+
+// TestUploadWorksWhenReplicationIsDisabled is the regression guard for a panic
+// that only appeared in production.
+//
+// main() used to declare `var replicator *replication.Manager` and pass it
+// straight into the gateway. A typed nil pointer stored in an interface is not
+// nil, so the gateway's `g.replicator == nil` guard did not fire, the nil
+// manager received EnqueueUpload, and every upload panicked with an empty reply
+// whenever replication was disabled — which is the default single-node
+// deployment. The local test gateway never set the field at all, so the suite
+// stayed green.
+func TestUploadWorksWhenReplicationIsDisabled(t *testing.T) {
+	store, err := files.NewDiskStoreWithOptions(t.TempDir(), files.Options{})
+	require.NoError(t, err)
+
+	// This is the shape main() now builds: an interface that is genuinely nil.
+	var replicator replicationEnqueuer
+	router := newRouter(gateway{
+		service:        files.NewService(store),
+		token:          "test-token",
+		maxUploadBytes: 1 << 20,
+		replicator:     replicator,
+	})
+
+	upload := multipartUpload(t, "/api/v1/files", "plain.txt", "text/plain", []byte("payload"))
+	authorize(upload, "test-token")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, upload)
+
+	require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+
+	// The object really landed.
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/files?limit=10", nil)
+	authorize(listRequest, "test-token")
+	listed := doJSON[fileListResponse](t, router, listRequest, http.StatusOK)
+	require.Len(t, listed.Results, 1)
+	assert.Equal(t, "plain.txt", listed.Results[0].Name)
+}
