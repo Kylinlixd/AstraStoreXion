@@ -167,6 +167,41 @@ func (c xionClient) delete(ctx context.Context, id string) error {
 	return err
 }
 
+// listUploads reports resumable upload sessions, including abandoned ones.
+func (c xionClient) listUploads(ctx context.Context) ([]byte, error) {
+	return c.request(ctx, http.MethodGet, "/api/v1/uploads", nil, "", http.StatusOK)
+}
+
+// sweepUploads expires sessions whose TTL has elapsed.
+func (c xionClient) sweepUploads(ctx context.Context) ([]byte, error) {
+	return c.request(ctx, http.MethodDelete, "/api/v1/uploads", nil, "", http.StatusOK)
+}
+
+// listTrash reports trashed objects.
+func (c xionClient) listTrash(ctx context.Context, limit, offset int) ([]byte, error) {
+	path := fmt.Sprintf("/api/v1/trash?limit=%d&offset=%d", limit, offset)
+	return c.request(ctx, http.MethodGet, path, nil, "", http.StatusOK)
+}
+
+// restore brings a trashed object back with its original file id.
+func (c xionClient) restore(ctx context.Context, id string) ([]byte, error) {
+	return c.request(ctx, http.MethodPost, "/api/v1/files/"+url.PathEscape(id)+"/restore", nil, "", http.StatusOK)
+}
+
+// purgeTrash permanently removes trashed objects older than the cutoff. An
+// empty cutoff removes everything.
+func (c xionClient) purgeTrash(ctx context.Context, olderThan string, all bool) ([]byte, error) {
+	payload := map[string]any{"all": all}
+	if olderThan != "" {
+		payload["older_than"] = olderThan
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode purge request: %w", err)
+	}
+	return c.request(ctx, http.MethodPost, "/api/v1/trash/purge", bytes.NewReader(body), "application/json", http.StatusOK)
+}
+
 func newXionHTTPClient(cfg config) xionClient {
 	return xionClient{config: cfg, http: &http.Client{Timeout: cfg.timeout}}
 }

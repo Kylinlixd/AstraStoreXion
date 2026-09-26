@@ -14,6 +14,18 @@ import (
 
 const defaultEnvFile = "/etc/astrastore-xion.env"
 
+// Build metadata, injected with -ldflags at release time.
+var (
+	version = "dev"
+	commit  = "none"
+)
+
+// Version reports the injected build metadata so an operator can tell which
+// commit a deployed binary came from.
+func Version() string {
+	return version + " (" + commit + ")"
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "xionctl:", err)
@@ -152,9 +164,122 @@ func runWithRunners(args []string, stdout, stderr io.Writer, journalRunner journ
 		}
 		_, err := fmt.Fprintf(stdout, "deleted %s\n", id)
 		return err
+	case "version":
+		if len(commandArgs) != 0 {
+			return errors.New("用法: xionctl version")
+		}
+		_, err := fmt.Fprintf(stdout, "xionctl %s\n", Version())
+		return err
+	case "uploads":
+		return runUploadsCommand(ctx, client, commandArgs, stdout, stderr)
+	case "trash":
+		return runTrashCommand(ctx, client, commandArgs, stdout, stderr)
 	default:
 		return fmt.Errorf("未知命令 %q\n%s", command, usage())
 	}
+}
+
+func runUploadsCommand(ctx context.Context, client xionClient, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("用法: xionctl uploads <list|purge>")
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return errors.New("用法: xionctl uploads list")
+		}
+		payload, err := client.listUploads(ctx)
+		if err != nil {
+			return err
+		}
+		return printJSON(stdout, payload)
+	case "purge":
+		if len(args) != 1 {
+			return errors.New("用法: xionctl uploads purge")
+		}
+		payload, err := client.sweepUploads(ctx)
+		if err != nil {
+			return err
+		}
+		return printRemoved(stdout, payload)
+	default:
+		return errors.New("用法: xionctl uploads <list|purge>")
+	}
+}
+
+type trashPurgeFlags struct {
+	olderThan string
+	all       bool
+}
+
+func parseTrashPurgeFlags(args []string, stderr io.Writer) (trashPurgeFlags, error) {
+	flags := newFlagSet("trash purge", stderr)
+	olderThan := flags.String("older-than", "", "只清理该时长之前删除的对象，例如 720h")
+	all := flags.Bool("all", false, "清理回收站中的全部对象")
+	confirmed := flags.Bool("yes", false, "确认永久删除")
+	if err := flags.Parse(args); err != nil {
+		return trashPurgeFlags{}, err
+	}
+	if flags.NArg() != 0 {
+		return trashPurgeFlags{}, errors.New("用法: xionctl trash purge (--older-than 720h | --all) --yes")
+	}
+	if !*confirmed {
+		return trashPurgeFlags{}, errors.New("永久删除必须显式提供 --yes")
+	}
+	if !*all && strings.TrimSpace(*olderThan) == "" {
+		return trashPurgeFlags{}, errors.New("必须提供 --older-than 或 --all")
+	}
+	return trashPurgeFlags{olderThan: *olderThan, all: *all}, nil
+}
+
+func runTrashCommand(ctx context.Context, client xionClient, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("用法: xionctl trash <list|restore|purge>")
+	}
+	switch args[0] {
+	case "list":
+		flags, err := parseListFlags(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		payload, err := client.listTrash(ctx, flags.limit, flags.offset)
+		if err != nil {
+			return err
+		}
+		return printJSON(stdout, payload)
+	case "restore":
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			return errors.New("用法: xionctl trash restore <file-id>")
+		}
+		payload, err := client.restore(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return printJSON(stdout, payload)
+	case "purge":
+		flags, err := parseTrashPurgeFlags(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		payload, err := client.purgeTrash(ctx, flags.olderThan, flags.all)
+		if err != nil {
+			return err
+		}
+		return printRemoved(stdout, payload)
+	default:
+		return errors.New("用法: xionctl trash <list|restore|purge>")
+	}
+}
+
+func printRemoved(writer io.Writer, payload []byte) error {
+	var envelope struct {
+		Removed int `json:"removed"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return fmt.Errorf("parse purge response: %w", err)
+	}
+	_, err := fmt.Fprintf(writer, "removed %d\n", envelope.Removed)
+	return err
 }
 
 func findCommandIndex(args []string) int {
@@ -273,5 +398,5 @@ func maxInt64(value int64) int64 {
 }
 
 func usage() string {
-	return "使用方法:\n  xionctl health\n  xionctl capacity\n  xionctl config [--max-upload-size 100M]\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
+	return "使用方法:\n  xionctl health\n  xionctl capacity\n  xionctl config [--max-upload-size 100M]\n  xionctl list [--limit 100] [--offset 0]\n  xionctl info <file-id>\n  xionctl upload <file-path>\n  xionctl download <file-id> <output-path>\n  xionctl delete <file-id> --yes\n  xionctl uploads list\n  xionctl uploads purge\n  xionctl trash list [--limit 100] [--offset 0]\n  xionctl trash restore <file-id>\n  xionctl trash purge (--older-than 720h | --all) --yes\n  xionctl version\n  xionctl logs [--lines 100] [--since 1h] [--follow]\n\n全局选项:\n  --env-file <path>  默认 /etc/astrastore-xion.env\n  --api <url>        覆盖 Xion API 地址\n  --token <token>    覆盖服务令牌\n  --timeout <dur>    默认 30s"
 }

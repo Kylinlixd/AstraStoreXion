@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/astrastore/astrastore-xion/pkg/files"
 	"github.com/astrastore/astrastore-xion/pkg/replication"
@@ -29,6 +30,7 @@ type fileService interface {
 	Delete(context.Context, string) error
 	Ready(context.Context) error
 	Capacity(context.Context) (files.Capacity, error)
+	Count(context.Context) (int, error)
 }
 
 type quotaService interface {
@@ -56,6 +58,22 @@ type replicationEnqueuer interface {
 	Retry(context.Context, string) error
 }
 
+// recoverer repairs crash leftovers at startup.
+type recoverer interface {
+	Recover(context.Context) (files.RecoveryReport, error)
+}
+
+// uploadAdmin lists and expires resumable upload sessions.
+type uploadAdmin interface {
+	ListUploads(context.Context) ([]files.UploadSession, error)
+	SweepUploads(context.Context) (int, error)
+}
+
+// trashAdmin permanently removes trashed entries.
+type trashAdmin interface {
+	PurgeTrash(context.Context, time.Time) (int, error)
+}
+
 type gateway struct {
 	service        fileService
 	token          string
@@ -66,6 +84,18 @@ type gateway struct {
 type fileListResponse struct {
 	Count   int          `json:"count"`
 	Results []files.File `json:"results"`
+	// Total is the number of matching records, not just this page.
+	Total int `json:"total"`
+}
+
+type uploadListResponse struct {
+	Count   int                   `json:"count"`
+	Total   int                   `json:"total"`
+	Results []files.UploadSession `json:"results"`
+}
+
+type purgeResponse struct {
+	Removed int `json:"removed"`
 }
 
 type statusResponse struct {
@@ -111,6 +141,7 @@ func newRouter(g gateway) http.Handler {
 	trashRouter := router.PathPrefix("/api/v1/trash").Subrouter()
 	trashRouter.Use(g.authenticate)
 	trashRouter.HandleFunc("", g.listTrash).Methods(http.MethodGet)
+	trashRouter.HandleFunc("/purge", g.purgeTrash).Methods(http.MethodPost)
 
 	replicationRouter := router.PathPrefix("/api/v1/replication").Subrouter()
 	replicationRouter.Use(g.authenticate)
@@ -120,6 +151,8 @@ func newRouter(g gateway) http.Handler {
 	uploadRouter := router.PathPrefix("/api/v1/uploads").Subrouter()
 	uploadRouter.Use(g.authenticate)
 	uploadRouter.HandleFunc("", g.startUpload).Methods(http.MethodPost)
+	uploadRouter.HandleFunc("", g.listUploads).Methods(http.MethodGet)
+	uploadRouter.HandleFunc("", g.sweepUploads).Methods(http.MethodDelete)
 	uploadRouter.HandleFunc("/{id}/complete", g.completeUpload).Methods(http.MethodPost)
 	uploadRouter.HandleFunc("/{id}", g.getUpload).Methods(http.MethodGet)
 	uploadRouter.HandleFunc("/{id}", g.appendUpload).Methods(http.MethodPut)
@@ -295,7 +328,12 @@ func (g gateway) list(writer http.ResponseWriter, request *http.Request) {
 		handleServiceError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Results: stored})
+	total, err := g.service.Count(request.Context())
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, fileListResponse{Count: len(stored), Total: total, Results: stored})
 }
 
 func (g gateway) capacity(writer http.ResponseWriter, request *http.Request) {
@@ -518,6 +556,90 @@ func (g gateway) abortUpload(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (g gateway) listUploads(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(uploadAdmin)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	sessions, err := service.ListUploads(request.Context())
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, uploadListResponse{Count: len(sessions), Total: len(sessions), Results: sessions})
+}
+
+func (g gateway) sweepUploads(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(uploadAdmin)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "resumable_uploads_unavailable", "resumable uploads are not enabled")
+		return
+	}
+	removed, err := service.SweepUploads(request.Context())
+	if err != nil {
+		handleUploadError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, purgeResponse{Removed: removed})
+}
+
+type purgeTrashRequest struct {
+	// OlderThan accepts a Go duration ("720h") or an RFC3339 timestamp.
+	OlderThan string `json:"older_than"`
+	// All removes every trashed entry regardless of age.
+	All bool `json:"all"`
+}
+
+func (g gateway) purgeTrash(writer http.ResponseWriter, request *http.Request) {
+	service, ok := g.service.(trashAdmin)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "trash_unavailable", "trash is not enabled")
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, 4<<10)
+	var payload purgeTrashRequest
+	if request.ContentLength != 0 {
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "purge body must be valid JSON")
+			return
+		}
+	}
+	cutoff, err := parsePurgeCutoff(payload)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	removed, err := service.PurgeTrash(request.Context(), cutoff)
+	if err != nil {
+		handleServiceError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, purgeResponse{Removed: removed})
+}
+
+// parsePurgeCutoff converts the request into the exclusive deletion bound.
+// Entries deleted at or before the cutoff are removed; a zero time means "all".
+func parsePurgeCutoff(payload purgeTrashRequest) (time.Time, error) {
+	value := strings.TrimSpace(payload.OlderThan)
+	if payload.All {
+		return time.Time{}, nil
+	}
+	if value == "" {
+		return time.Time{}, errors.New("older_than or all is required")
+	}
+	if duration, err := time.ParseDuration(value); err == nil {
+		if duration < 0 {
+			return time.Time{}, errors.New("older_than must not be negative")
+		}
+		return time.Now().UTC().Add(-duration), nil
+	}
+	if timestamp, err := time.Parse(time.RFC3339, value); err == nil {
+		return timestamp.UTC(), nil
+	}
+	return time.Time{}, errors.New("older_than must be a duration such as 720h or an RFC3339 timestamp")
 }
 
 func (g gateway) delete(writer http.ResponseWriter, request *http.Request) {

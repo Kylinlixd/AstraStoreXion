@@ -506,6 +506,7 @@ func (*streamProbeService) List(context.Context, int, int) ([]files.File, error)
 
 func (*streamProbeService) Delete(context.Context, string) error { return nil }
 func (*streamProbeService) Ready(context.Context) error          { return nil }
+func (*streamProbeService) Count(context.Context) (int, error)   { return 1, nil }
 func (*streamProbeService) Capacity(context.Context) (files.Capacity, error) {
 	return files.Capacity{}, nil
 }
@@ -526,4 +527,5 @@ func (*pausedService) List(context.Context, int, int) ([]files.File, error) {
 }
 func (*pausedService) Delete(context.Context, string) error             { return nil }
 func (*pausedService) Ready(context.Context) error                      { return nil }
+func (*pausedService) Count(context.Context) (int, error)               { return 0, nil }
 func (*pausedService) Capacity(context.Context) (files.Capacity, error) { return files.Capacity{}, nil }
