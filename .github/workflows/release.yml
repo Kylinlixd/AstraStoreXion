@@ -1,0 +1,132 @@
+name: release
+
+# 推送 main 即构建、安装并验证线上服务，与 myblog-admin 的发布方式一致：
+# GitHub Actions 构建 → scp 上传 → ssh 原子安装 + 就绪校验，失败自动回滚。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "blog/**"
+      - "docs/**"
+      - "README.md"
+      - "**.md"
+  workflow_dispatch:
+
+concurrency:
+  # 同一时间只允许一次发布，避免两个流水线同时改线上二进制。
+  group: astrastore-xion-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build release binaries
+        run: make release-linux VERSION="${GITHUB_REF_NAME}-$(git rev-parse --short HEAD)" COMMIT="$(git rev-parse --short HEAD)"
+
+      - name: Package release
+        run: |
+          set -eu
+          mkdir -p .release-package
+          cp bin/linux-amd64/astrastore-xion .release-package/
+          cp bin/linux-amd64/xionctl .release-package/
+          cp deploy/systemd/astrastore-xion.service .release-package/
+          cp deploy/systemd/astrastore-xion.env.example .release-package/
+          tar -czf release.tgz -C .release-package .
+          ls -l release.tgz
+
+      - name: Upload to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "release.tgz"
+          target: "/tmp"
+
+      - name: Install and verify
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          RELEASE_ID: ${{ github.sha }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: RELEASE_ID
+          script: |
+            set -eu
+
+            staging="$(mktemp -d /tmp/astrastore-release-XXXXXX)"
+            backup_dir="/var/backups/astrastore-xion"
+            mkdir -p "$backup_dir"
+            tar -xzf /tmp/release.tgz -C "$staging"
+
+            # 旧二进制与旧环境模板先留一份，回滚只需要一条 mv。
+            stamp="$(date +%Y%m%d-%H%M%S)"
+            if [ -x /usr/local/bin/astrastore-xion ]; then
+              cp -p /usr/local/bin/astrastore-xion "$backup_dir/astrastore-xion.$stamp"
+              cp -p /usr/local/bin/xionctl "$backup_dir/xionctl.$stamp"
+            fi
+
+            # 环境文件已经存在时只补齐缺失项，绝不覆盖线上令牌。
+            if [ -f /etc/astrastore-xion.env ]; then
+              for key in XION_UPLOAD_SESSION_TTL XION_SHUTDOWN_TIMEOUT; do
+                if ! grep -q "^${key}=" /etc/astrastore-xion.env; then
+                  case "$key" in
+                    XION_UPLOAD_SESSION_TTL) value="24h" ;;
+                    XION_SHUTDOWN_TIMEOUT) value="300s" ;;
+                  esac
+                  printf '%s=%s\n' "$key" "$value" >> /etc/astrastore-xion.env
+                fi
+              done
+            fi
+
+            # install 写到目标目录的临时文件再 rename，避免运行中的进程读到半个二进制。
+            install -o root -g root -m 0755 "$staging/astrastore-xion" /usr/local/bin/astrastore-xion
+            install -o root -g root -m 0755 "$staging/xionctl" /usr/local/bin/xionctl
+
+            # 单元文件与仓库保持一致，再 reload 让 systemd 重新读取。
+            if ! cmp -s "$staging/astrastore-xion.service" /etc/systemd/system/astrastore-xion.service; then
+              install -o root -g root -m 0644 "$staging/astrastore-xion.service" /etc/systemd/system/astrastore-xion.service
+              systemctl daemon-reload
+            fi
+
+            systemctl restart astrastore-xion
+
+            # 就绪检查：新二进制会先做一次自愈再接受流量。
+            ready=0
+            for _ in $(seq 1 30); do
+              if curl -fsS --max-time 3 http://127.0.0.1:8081/readyz >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+
+            if [ "$ready" -ne 1 ]; then
+              echo "readiness failed after restart; rolling back" >&2
+              journalctl -u astrastore-xion --since '2 min ago' --no-pager | tail -40 >&2 || true
+              if [ -x "$backup_dir/astrastore-xion.$stamp" ]; then
+                install -o root -g root -m 0755 "$backup_dir/astrastore-xion.$stamp" /usr/local/bin/astrastore-xion
+                install -o root -g root -m 0755 "$backup_dir/xionctl.$stamp" /usr/local/bin/xionctl
+                systemctl restart astrastore-xion
+                sleep 2
+                curl -fsS --max-time 3 http://127.0.0.1:8081/readyz >/dev/null && echo "rolled back to previous release" >&2
+              fi
+              exit 1
+            fi
+
+            /usr/local/bin/xionctl --api http://127.0.0.1:8081 --token "$(grep '^XION_SERVICE_TOKEN=' /etc/astrastore-xion.env | cut -d= -f2-)" version
+            /usr/local/bin/xionctl --api http://127.0.0.1:8081 --token "$(grep '^XION_SERVICE_TOKEN=' /etc/astrastore-xion.env | cut -d= -f2-)" health
+
+            rm -rf "$staging" /tmp/release.tgz
+            echo "deployed release $RELEASE_ID"

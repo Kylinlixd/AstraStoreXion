@@ -20,6 +20,12 @@ import (
 
 const defaultMaxUploadBytes int64 = 1 << 30
 
+// Build metadata, injected with -ldflags at release time.
+var (
+	version = "dev"
+	commit  = "none"
+)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -48,11 +54,37 @@ func run(ctx context.Context) error {
 	if err != nil || ownerQuotaBytes < 0 {
 		return fmt.Errorf("XION_OWNER_QUOTA_BYTES must be zero or a positive integer")
 	}
-	store, err = files.NewDiskStoreWithPauseAndQuota(dataDirectory, pauseAtPercent, ownerQuotaBytes)
+	uploadTTL, err := envDuration("XION_UPLOAD_SESSION_TTL", 0)
+	if err != nil || uploadTTL < 0 {
+		return fmt.Errorf("XION_UPLOAD_SESSION_TTL must be a non-negative duration such as 24h")
+	}
+	shutdownTimeout, err := envDuration("XION_SHUTDOWN_TIMEOUT", 30*time.Second)
+	if err != nil || shutdownTimeout <= 0 {
+		return fmt.Errorf("XION_SHUTDOWN_TIMEOUT must be a positive duration")
+	}
+	store, err = files.NewDiskStoreWithOptions(dataDirectory, files.Options{
+		PauseAtPercent:  pauseAtPercent,
+		OwnerQuotaBytes: ownerQuotaBytes,
+		UploadTTL:       uploadTTL,
+	})
 	if err != nil {
 		return fmt.Errorf("initialize file store: %w", err)
 	}
 	service := files.NewService(store)
+
+	// Repair crash leftovers before accepting traffic. Without this, a process
+	// killed between writing a temporary manifest and renaming it would leave
+	// the store permanently unready.
+	recovery, err := service.Recover(ctx)
+	if err != nil {
+		return fmt.Errorf("recover storage: %w", err)
+	}
+	if recovery.Recovered() {
+		log.Printf("recovered storage: partial_objects=%d metadata_manifests=%d upload_manifests=%d upload_sessions=%d expired_uploads=%d expired_trash=%d",
+			recovery.PartialObjects, recovery.MetadataManifests, recovery.UploadManifests,
+			recovery.UploadSessions, recovery.ExpiredUploads, recovery.ExpiredTrash)
+	}
+
 	var replicator *replication.Manager
 	if replicaURL := strings.TrimSpace(os.Getenv("XION_REPLICA_URL")); replicaURL != "" {
 		maxAttempts, parseErr := envInt("XION_REPLICATION_MAX_ATTEMPTS", 10)
@@ -83,13 +115,14 @@ func run(ctx context.Context) error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("AstraStoreXion listening on %s with data directory %s", address, dataDirectory)
+		log.Printf("AstraStoreXion %s (commit %s) listening on %s with data directory %s", version, commit, address, dataDirectory)
 		serverErrors <- server.ListenAndServe()
 	}()
 
 	select {
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		log.Printf("shutting down: waiting up to %s for in-flight requests", shutdownTimeout)
+		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownContext); err != nil {
 			return fmt.Errorf("shutdown API server: %w", err)
@@ -124,4 +157,17 @@ func envInt64(name string, defaultValue int64) (int64, error) {
 		return defaultValue, nil
 	}
 	return strconv.ParseInt(value, 10, 64)
+}
+
+func envDuration(name string, defaultValue time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	return time.ParseDuration(value)
+}
+
+// Version reports the injected build metadata.
+func Version() string {
+	return version + " (" + commit + ")"
 }

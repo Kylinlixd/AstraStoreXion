@@ -11,7 +11,7 @@ EnvironmentFile=/etc/astrastore-xion.env
 ExecStart=/usr/local/bin/astrastore-xion
 Restart=on-failure
 RestartSec=3s
-TimeoutStopSec=35s
+TimeoutStopSec=300s
 UMask=0077
 
 StateDirectory=astrastore-xion

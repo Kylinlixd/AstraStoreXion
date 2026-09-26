@@ -1,4 +1,9 @@
-.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway xion-service xionctl metaservice storagenode client python-test fixtures smoke docker-build dev-start dev-stop help
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+XIONCTL_LDFLAGS := $(LDFLAGS) -s -w
+
+.PHONY: all build clean test test-unit test-integration bench cover gen-proto apigateway xion-service xionctl metaservice storagenode client python-test fixtures smoke docker-build docker-build-experimental release-linux dev-start dev-stop help
 
 # 默认目标
 all: build
@@ -17,17 +22,24 @@ build:
 apigateway:
 	@echo "构建API网关..."
 	@mkdir -p bin
-	@go build -o bin/apigateway ./core/apigateway
+	@go build -ldflags='$(LDFLAGS)' -o bin/apigateway ./core/apigateway
 
 # 构建博客融合使用的单节点服务
 xion-service:
 	@mkdir -p bin
-	@go build -trimpath -o bin/astrastore-xion ./core/apigateway
+	@go build -trimpath -ldflags='$(LDFLAGS)' -o bin/astrastore-xion ./core/apigateway
 
 # 构建服务器命令行工具
 xionctl:
 	@mkdir -p bin
-	@go build -trimpath -ldflags='-s -w' -o bin/xionctl ./cmd/xionctl
+	@go build -trimpath -ldflags='$(XIONCTL_LDFLAGS)' -o bin/xionctl ./cmd/xionctl
+
+# 交叉编译 Linux amd64 发布产物
+release-linux:
+	@mkdir -p bin/linux-amd64
+	@GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/linux-amd64/astrastore-xion ./core/apigateway
+	@GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='$(XIONCTL_LDFLAGS)' -o bin/linux-amd64/xionctl ./cmd/xionctl
+	@echo "发布产物: bin/linux-amd64 (版本 $(VERSION))"
 
 # 运行生产 Python SDK 测试
 python-test:
@@ -100,13 +112,21 @@ clean:
 	@echo "清理构建文件..."
 	@rm -rf bin
 
-# 构建Docker镜像
+# 构建生产镜像（单节点文件服务）
 docker-build:
-	@echo "构建Docker镜像..."
+	@echo "构建生产镜像..."
+	@docker build -t astrastore/xion:$(VERSION) \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+		-f deploy/dockerfile/astrastore-xion.Dockerfile .
+	@echo "镜像构建完成: astrastore/xion:$(VERSION)"
+
+# 构建实验性分布式原型镜像（不是生产依赖）
+docker-build-experimental:
+	@echo "构建实验性镜像..."
 	@docker build -t astrastore/apigateway:latest -f deploy/dockerfile/apigateway.Dockerfile .
 	@docker build -t astrastore/metaservice:latest -f deploy/dockerfile/metaservice.Dockerfile .
 	@docker build -t astrastore/storagenode:latest -f deploy/dockerfile/storagenode.Dockerfile .
-	@echo "Docker镜像构建完成！"
+	@echo "实验性镜像构建完成！"
 
 # 启动开发环境
 dev-start:
@@ -140,7 +160,8 @@ help:
 	@echo "  make cover           - 生成测试覆盖率报告"
 	@echo "  make gen-proto       - 生成Protocol Buffers代码"
 	@echo "  make clean           - 清理构建文件"
-	@echo "  make docker-build    - 构建Docker镜像"
+	@echo "  make docker-build    - 构建生产 Docker 镜像"
+	@echo "  make docker-build-experimental - 构建实验性原型镜像"
 	@echo "  make dev-start       - 启动开发环境"
 	@echo "  make dev-stop        - 停止开发环境"
 	@echo "  make help            - 显示帮助信息"
