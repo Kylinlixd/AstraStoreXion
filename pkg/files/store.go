@@ -94,50 +94,67 @@ type DiskStore struct {
 // categories separate makes the transitions exact: completing an upload moves
 // bytes from uploads to files; deleting moves them from files to trash;
 // restoring moves them back; purging drops trash bytes entirely.
+//
+// Counts are tracked per record, not per owner: the map is keyed by owner, so
+// len(files) is the number of owners, not the number of objects.
 type usageIndex struct {
-	files   map[string]int64
-	trash   map[string]int64
-	uploads map[string]int64
+	files   map[string]usageEntry
+	trash   map[string]usageEntry
+	uploads map[string]usageEntry
+}
+
+// usageEntry is one owner's contribution to a category.
+type usageEntry struct {
+	Bytes   int64
+	Records int
 }
 
 func newUsageIndex() usageIndex {
 	return usageIndex{
-		files:   make(map[string]int64),
-		trash:   make(map[string]int64),
-		uploads: make(map[string]int64),
+		files:   make(map[string]usageEntry),
+		trash:   make(map[string]usageEntry),
+		uploads: make(map[string]usageEntry),
 	}
 }
 
+// total returns the bytes charged to one owner across all three categories.
 func (u usageIndex) total(owner string) int64 {
-	return u.files[owner] + u.trash[owner] + u.uploads[owner]
-}
-
-func (u usageIndex) activeCount() int {
-	return len(u.files)
+	return u.files[owner].Bytes + u.trash[owner].Bytes + u.uploads[owner].Bytes
 }
 
 func (u usageIndex) bytesOf() int64 {
 	var total int64
-	for _, size := range u.files {
-		total += size
+	for _, entry := range u.files {
+		total += entry.Bytes
+	}
+	return total
+}
+
+func (u usageIndex) activeCount() int {
+	count := 0
+	for _, entry := range u.files {
+		count += entry.Records
+	}
+	return count
+}
+
+func (u usageIndex) bytesInTrash() int64 {
+	var total int64
+	for _, entry := range u.trash {
+		total += entry.Bytes
 	}
 	return total
 }
 
 func (u usageIndex) trashedCount() int {
-	return len(u.trash)
-}
-
-func (u usageIndex) bytesInTrash() int64 {
-	var total int64
-	for _, size := range u.trash {
-		total += size
+	count := 0
+	for _, entry := range u.trash {
+		count += entry.Records
 	}
-	return total
+	return count
 }
 
-// usage returns the byte slice for one category, creating it when needed.
-func (u usageIndex) bucket(kind usageKind) map[string]int64 {
+func (u usageIndex) bucket(kind usageKind) map[string]usageEntry {
 	switch kind {
 	case usageTrash:
 		return u.trash
@@ -333,7 +350,7 @@ func (s *DiskStore) Put(ctx context.Context, input UploadInput) (File, error) {
 		_ = syncDirectory(s.objectsDir)
 		return File{}, fmt.Errorf("sync metadata directory: %w", err)
 	}
-	s.moveUsage(owner, usageKind(-1), usageFile, size)
+	s.moveUsage(owner, usageKind(-1), usageFile, size, 1)
 	return cloneFile(stored), nil
 }
 
@@ -408,7 +425,7 @@ func (s *DiskStore) StartUpload(ctx context.Context, input MultipartStartInput) 
 	if err := syncDirectory(sessionDir); err != nil {
 		return UploadSession{}, fmt.Errorf("sync upload session: %w", err)
 	}
-	s.moveUsage(ownerFromMetadata(session.Metadata), usageKind(-1), usageUpload, session.Size)
+	s.moveUsage(ownerFromMetadata(session.Metadata), usageKind(-1), usageUpload, session.Size, 1)
 	removeSession = false
 	return cloneUploadSession(session), nil
 }
@@ -608,7 +625,7 @@ func (s *DiskStore) CompleteUpload(ctx context.Context, id string) (File, error)
 	}
 	// The reservation becomes a real object: migrate the bytes instead of
 	// charging them a second time.
-	s.moveUsage(ownerFromMetadata(session.Metadata), usageUpload, usageFile, session.Size)
+	s.moveUsage(ownerFromMetadata(session.Metadata), usageUpload, usageFile, session.Size, 1)
 	removeObject = false
 	_ = os.Remove(dataPath)
 	return cloneFile(stored), nil
@@ -736,10 +753,12 @@ func (s *DiskStore) rebuildUsageLocked() error {
 		owner = normalizeOwner(owner)
 		bucket := index.bucket(kind)
 		current := bucket[owner]
-		if current > math.MaxInt64-size {
+		if current.Bytes > math.MaxInt64-size {
 			return fmt.Errorf("%w: owner usage overflow", ErrCorruptMetadata)
 		}
-		bucket[owner] = current + size
+		current.Bytes += size
+		current.Records++
+		bucket[owner] = current
 		return nil
 	}
 
@@ -800,29 +819,40 @@ func (s *DiskStore) ownerUsageLocked(owner string) (int64, error) {
 	return s.usage.total(normalizeOwner(owner)), nil
 }
 
-// moveUsage transfers bytes between categories for one owner. It is the only
-// mutation primitive, which keeps the three categories consistent: bytes never
-// appear twice and never disappear silently.
-func (s *DiskStore) moveUsage(owner string, from, to usageKind, size int64) {
+// moveUsage transfers bytes and records between categories for one owner. It is
+// the only mutation primitive, which keeps the three categories consistent:
+// records never appear twice and never disappear silently.
+func (s *DiskStore) moveUsage(owner string, from, to usageKind, size int64, records int) {
 	if !s.usageValid || size <= 0 {
 		return
 	}
 	owner = normalizeOwner(owner)
 	if from >= 0 {
-		source := s.usage.bucket(from)
-		source[owner] -= size
-		if source[owner] <= 0 {
-			delete(source, owner)
+		bucket := s.usage.bucket(from)
+		entry := bucket[owner]
+		entry.Bytes -= size
+		entry.Records -= records
+		if entry.Bytes <= 0 {
+			delete(bucket, owner)
+		} else {
+			if entry.Records < 0 {
+				entry.Records = 0
+			}
+			bucket[owner] = entry
 		}
 	}
 	if to >= 0 {
-		s.usage.bucket(to)[owner] += size
+		bucket := s.usage.bucket(to)
+		entry := bucket[owner]
+		entry.Bytes += size
+		entry.Records += records
+		bucket[owner] = entry
 	}
 }
 
-// releaseUsage drops bytes from a category entirely.
+// releaseUsage drops one record from a category entirely.
 func (s *DiskStore) releaseUsage(owner string, kind usageKind, size int64) {
-	s.moveUsage(owner, kind, usageKind(-1), size)
+	s.moveUsage(owner, kind, usageKind(-1), size, 1)
 }
 
 // ownerUsageUnlocked walks the store and returns the quota usage for one owner.
@@ -1083,7 +1113,7 @@ func (s *DiskStore) Delete(ctx context.Context, id string) error {
 	}
 	// Trashed bytes still count against the owner, so move them between
 	// categories rather than releasing them.
-	s.moveUsage(ownerFromMetadata(stored.Metadata), usageFile, usageTrash, stored.Size)
+	s.moveUsage(ownerFromMetadata(stored.Metadata), usageFile, usageTrash, stored.Size, 1)
 	return nil
 }
 
@@ -1194,7 +1224,7 @@ func (s *DiskStore) Restore(ctx context.Context, id string) (File, error) {
 	}
 	rollbackObject = false
 	// The bytes leave the trash bucket and rejoin the active objects.
-	s.moveUsage(ownerFromMetadata(file.Metadata), usageTrash, usageFile, file.Size)
+	s.moveUsage(ownerFromMetadata(file.Metadata), usageTrash, usageFile, file.Size, 1)
 	return cloneFile(file), nil
 }
 

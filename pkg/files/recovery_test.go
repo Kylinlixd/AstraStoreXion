@@ -382,3 +382,69 @@ func TestDiskStoreRecoverWithTTLIsReported(t *testing.T) {
 	_, err = store.GetUpload(ctx, session.ID)
 	assert.ErrorIs(t, err, ErrUploadNotFound)
 }
+
+// TestDiskStoreCapacityCountsEveryRecord guards the accounting against
+// aggregating records per owner: the index is keyed by owner, so counting map
+// keys reports the number of owners instead of the number of objects.
+func TestDiskStoreCapacityCountsEveryRecord(t *testing.T) {
+	store, _, _ := newRecoverableStore(t, Options{})
+	ctx := context.Background()
+
+	// Three objects under one owner plus two under another, plus one default.
+	for index := 0; index < 3; index++ {
+		_, err := store.Put(ctx, UploadInput{
+			Name: "single-owner.txt", Reader: strings.NewReader("aaa"),
+			Metadata: map[string]string{"owner": "blog"},
+		})
+		require.NoError(t, err)
+	}
+	for index := 0; index < 2; index++ {
+		_, err := store.Put(ctx, UploadInput{
+			Name: "other-owner.txt", Reader: strings.NewReader("bb"),
+			Metadata: map[string]string{"owner": "media"},
+		})
+		require.NoError(t, err)
+	}
+	trashed, err := store.Put(ctx, UploadInput{Name: "anons.txt", Reader: strings.NewReader("c")})
+	require.NoError(t, err)
+
+	capacity, err := store.Capacity(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 6, capacity.ObjectCount, "one owner holding three objects is still three objects")
+	assert.EqualValues(t, 3*3+2*2+1, capacity.ObjectBytes)
+
+	// Trashing a record moves it, it does not duplicate or drop it.
+	require.NoError(t, store.Delete(ctx, trashed.ID))
+	capacity, err = store.Capacity(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 5, capacity.ObjectCount)
+	assert.Equal(t, 1, capacity.TrashCount)
+	assert.EqualValues(t, 1, capacity.TrashBytes)
+	assert.EqualValues(t, 3*3+2*2, capacity.ObjectBytes)
+
+	// Restoring returns it to the active side.
+	_, err = store.Restore(ctx, trashed.ID)
+	require.NoError(t, err)
+	capacity, err = store.Capacity(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 6, capacity.ObjectCount)
+	assert.Equal(t, 0, capacity.TrashCount)
+
+	// Purging drops the record only where it was.
+	require.NoError(t, store.Delete(ctx, trashed.ID))
+	purged, err := store.PurgeTrash(ctx, time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+	capacity, err = store.Capacity(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 5, capacity.ObjectCount)
+	assert.Equal(t, 0, capacity.TrashCount)
+
+	// A rebuild must agree with the incremental index.
+	require.NoError(t, store.RebuildUsage(ctx))
+	rebuilt, err := store.Capacity(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, capacity.ObjectCount, rebuilt.ObjectCount)
+	assert.Equal(t, capacity.ObjectBytes, rebuilt.ObjectBytes)
+	assert.Equal(t, capacity.TrashCount, rebuilt.TrashCount)
+}
