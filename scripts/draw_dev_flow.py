@@ -78,10 +78,12 @@ class Canvas:
             y += h + gap
 
     # ---------- 连线 ----------
-    def arrow(self, points, label=None, label_offset=(0, -18), dashed=False):
+    def arrow(self, points, label=None, label_offset=(0, -18), both=False):
         pts = [(px * SCALE, py * SCALE) for px, py in points]
         self.d.line(pts, fill=LINE, width=2 * SCALE, joint="curve")
         self._arrow_head(pts[-2], pts[-1])
+        if both:
+            self._arrow_head(pts[1], pts[0])
         if label:
             mx = (pts[-2][0] + pts[-1][0]) / 2 + label_offset[0] * SCALE
             my = (pts[-2][1] + pts[-1][1]) / 2 + label_offset[1] * SCALE
@@ -129,7 +131,7 @@ def main() -> None:
     r1, hbox = 100, 120
     r2 = 450
     r3 = 800
-    W, H = 1550, 1480
+    W, H = 1550, 1540
 
     cv = Canvas(W, H)
 
@@ -157,25 +159,21 @@ def main() -> None:
     cv.box(c1, r3, w1, hbox, ["阶段六 v1.1", "加固与自动发布", "崩溃自愈 · 配额索引"])
 
     # ---------- 折返：阶段六框底正中 → 回归验证菱形顶 ----------
-    dcx, dcy, dhw, dhh = c1 + w1 / 2, 1145, 208, 158
+    dcx, dcy, dhw, dhh = c1 + w1 / 2, 1120, 208, 150
     cv.arrow([(dcx, r3 + hbox), (dcx, dcy - dhh)])
 
-    # ---------- 第 4 层：回归验证与交付 / 缺陷回路 ----------
+    # ---------- 第 4 层：回归验证；通过一路向下，不通过在右侧双向箭头 ----------
     cv.diamond(dcx, dcy, dhw, dhh, ["回归验证通过吗？", "test · race · vet · pytest"])
 
+    jw = 420
+    cv.box(dcx - jw / 2, dcy + dhh + 70, jw, 110,
+           ["单节点生产文件服务", "+ 实验性分布式扩展"], "result", rounded=True)
+    cv.arrow([(dcx, dcy + dhh), (dcx, dcy + dhh + 70)], label="通过", label_offset=(70, 6))
+
     bx, bw, bh = 700, 560, 110
-    cv.box(bx, dcy - 110, bw, bh, ["单节点生产文件服务", "+ 实验性分布式扩展"], "result", rounded=True)
-    cv.arrow([(dcx + dhw * 0.5, dcy - dhh * 0.5), (bx, dcy - 55)],
-             label="通过", label_offset=(0, -20))
-
-    cv.box(bx, dcy + 70, bw, bh, ["定位缺陷并补测试用例", "往返 · 故障注入 · 状态迁移"])
-    cv.arrow([(dcx + dhw * 0.5, dcy + dhh * 0.5), (bx, dcy + 125)],
-             label="不通过", label_offset=(0, -20))
-
-    # 修复后重跑：从缺陷框下方绕回菱形底顶点
-    cv.arrow([(bx + bw / 2, dcy + 180), (bx + bw / 2, dcy + 260),
-              (dcx, dcy + 260), (dcx, dcy + dhh)],
-             label="修复后重跑", label_offset=(120, 22))
+    cv.box(bx, dcy - bh / 2, bw, bh, ["定位缺陷并补测试用例", "往返 · 故障注入 · 状态迁移"])
+    cv.arrow([(dcx + dhw, dcy), (bx, dcy)], both=True,
+             label="不通过 · 修复后重跑", label_offset=(0, -22))
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     cv.img.save(OUT)
