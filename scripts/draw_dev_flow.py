@@ -131,7 +131,7 @@ def main() -> None:
     r1, hbox = 100, 120
     r2 = 450
     r3 = 800
-    W, H = 1550, 1540
+    W, H = 1560, 1620
 
     cv = Canvas(W, H)
 
@@ -166,11 +166,11 @@ def main() -> None:
     cv.diamond(dcx, dcy, dhw, dhh, ["回归验证通过吗？", "test · race · vet · pytest"])
 
     jw = 420
-    cv.box(dcx - jw / 2, dcy + dhh + 70, jw, 110,
+    cv.box(dcx - jw / 2, dcy + dhh + 165, jw, 110,
            ["单节点生产文件服务", "+ 实验性分布式扩展"], "result", rounded=True)
-    cv.arrow([(dcx, dcy + dhh), (dcx, dcy + dhh + 70)], label="通过", label_offset=(70, 6))
+    cv.arrow([(dcx, dcy + dhh), (dcx, dcy + dhh + 165)], label="通过", label_offset=(70, 0))
 
-    bx, bw, bh = 700, 560, 110
+    bx, bw, bh = 880, 560, 110
     cv.box(bx, dcy - bh / 2, bw, bh, ["定位缺陷并补测试用例", "往返 · 故障注入 · 状态迁移"])
     cv.arrow([(dcx + dhw, dcy), (bx, dcy)], both=True,
              label="不通过 · 修复后重跑", label_offset=(0, -22))
