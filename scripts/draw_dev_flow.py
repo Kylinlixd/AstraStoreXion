@@ -122,18 +122,18 @@ class Canvas:
 
 
 def main() -> None:
-    # ---- 三列网格：第 1 行向右，第 2 行向左，第 3 行向右 ----
+    # ---- 三列网格：第 1 层向右，第 2 层向左，第 3、4 层沿左列向下 ----
     c1, w1 = 60, 380
     c2, w2 = 620, 380
     c3, w3 = 1050, 440
-    r1, hbox = 110, 120
-    r2 = 460
-    r3 = 810
-    W, H = 1550, 1170
+    r1, hbox = 100, 120
+    r2 = 450
+    r3 = 800
+    W, H = 1550, 1480
 
     cv = Canvas(W, H)
 
-    # ---------- 第 1 行（自左向右）----------
+    # ---------- 第 1 层（自左向右）----------
     cv.box(c1, r1, w1, hbox, ["原型愿景", "分布式文件存储", "+ 多语言 SDK"], "startend", rounded=True)
     cv.box(c2, r1, w2, hbox, ["阶段一 架构原型", "三层架构 · 共识 · 分片"])
     cv.box(c3, r1, w3, hbox, ["阶段二 v0.1 文件服务重构", "砍范围 · 文件闭环 · 认证"])
@@ -143,7 +143,7 @@ def main() -> None:
     # ---------- 折返：阶段二框底正中 → 阶段三框顶 ----------
     cv.arrow([(c3 + w3 / 2, r1 + hbox), (c3 + w3 / 2, r2)])
 
-    # ---------- 第 2 行（自右向左）----------
+    # ---------- 第 2 层（自右向左）----------
     cv.box(c3, r2, w3, hbox, ["阶段三 v1.0 生产化上线", "原子落盘 · 沙箱部署 · 验收"])
     cv.box(c2, r2, w2, hbox, ["阶段四 运维与可靠性扩展", "xionctl · 续传 · 回收站"])
     cv.box(c1, r2, w1, hbox, ["阶段五 文档与品牌", "Logo · README 导航"])
@@ -153,26 +153,29 @@ def main() -> None:
     # ---------- 折返：阶段五框底正中 → 阶段六框顶 ----------
     cv.arrow([(c1 + w1 / 2, r2 + hbox), (c1 + w1 / 2, r3)])
 
-    # ---------- 第 3 行（验证与交付，自左向右）----------
+    # ---------- 第 3 层：阶段六（左列）----------
     cv.box(c1, r3, w1, hbox, ["阶段六 v1.1", "加固与自动发布", "崩溃自愈 · 配额索引"])
-    dcx, dcy, dhw, dhh = c2 + w2 / 2, r3 + hbox / 2, 190, 150
-    cv.diamond(dcx, dcy, dhw, dhh, ["回归验证通过吗？", "test · race · vet · pytest"])
-    cv.arrow([(c1 + w1, r3 + hbox / 2), (dcx - dhw, dcy)])
 
-    # 通过 → 交付结果（右上）
-    cv.box(c3, dcy - 110, w3, 110, ["单节点生产文件服务", "+ 实验性分布式扩展"], "result", rounded=True)
-    cv.arrow([(dcx + dhw * 0.55, dcy - dhh * 0.55), (c3, dcy - 55)],
+    # ---------- 折返：阶段六框底正中 → 回归验证菱形顶 ----------
+    dcx, dcy, dhw, dhh = c1 + w1 / 2, 1145, 208, 158
+    cv.arrow([(dcx, r3 + hbox), (dcx, dcy - dhh)])
+
+    # ---------- 第 4 层：回归验证与交付 / 缺陷回路 ----------
+    cv.diamond(dcx, dcy, dhw, dhh, ["回归验证通过吗？", "test · race · vet · pytest"])
+
+    bx, bw, bh = 700, 560, 110
+    cv.box(bx, dcy - 110, bw, bh, ["单节点生产文件服务", "+ 实验性分布式扩展"], "result", rounded=True)
+    cv.arrow([(dcx + dhw * 0.5, dcy - dhh * 0.5), (bx, dcy - 55)],
              label="通过", label_offset=(0, -20))
 
-    # 不通过 → 定位缺陷并补测试用例（右下）
-    cv.box(c3, r3 + 120, w3, 110, ["定位缺陷并补测试用例", "往返 · 故障注入 · 状态迁移"])
-    cv.arrow([(dcx + dhw * 0.55, dcy + dhh * 0.55), (c3 + w3 / 2 - 60, r3 + 120)],
-             label="不通过", label_offset=(-10, -22))
+    cv.box(bx, dcy + 70, bw, bh, ["定位缺陷并补测试用例", "往返 · 故障注入 · 状态迁移"])
+    cv.arrow([(dcx + dhw * 0.5, dcy + dhh * 0.5), (bx, dcy + 125)],
+             label="不通过", label_offset=(0, -20))
 
-    # 修复后重跑 → 绕到菱形下方回到判定
-    cv.arrow([(c3, r3 + 175), (dcx + 60, r3 + 175), (dcx + 60, dcy + dhh + 70),
-              (dcx, dcy + dhh + 70), (dcx, dcy + dhh)],
-             label="修复后重跑", label_offset=(-70, 20))
+    # 修复后重跑：从缺陷框下方绕回菱形底顶点
+    cv.arrow([(bx + bw / 2, dcy + 180), (bx + bw / 2, dcy + 260),
+              (dcx, dcy + 260), (dcx, dcy + dhh)],
+             label="修复后重跑", label_offset=(120, 22))
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     cv.img.save(OUT)
